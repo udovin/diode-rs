@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "diode",
+    "diode-macros",
+]
+resolver = "3"
+
+[workspace.dependencies]
+diode = { path = "diode", version = "0.1" }
+diode-macros = { path = "diode-macros", version = "0.1" }
