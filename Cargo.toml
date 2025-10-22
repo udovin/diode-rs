@@ -2,9 +2,17 @@
 members = [
     "diode",
     "diode-macros",
+    "diode-base",
+    "diode-base-macros",
+    "diode-http",
+    "diode-http-macros",
 ]
 resolver = "3"
 
 [workspace.dependencies]
 diode = { path = "diode", version = "0.1" }
 diode-macros = { path = "diode-macros", version = "0.1" }
+diode-base = { path = "diode-base", version = "0.1" }
+diode-base-macros = { path = "diode-base-macros", version = "0.1" }
+diode-http = { path = "diode-http", version = "0.1" }
+diode-http-macros = { path = "diode-http-macros", version = "0.1" }
