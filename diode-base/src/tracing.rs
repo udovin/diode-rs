@@ -29,7 +29,7 @@ pub struct Tracing {
 
 impl Tracing {
     pub fn build(app: &mut AppBuilder) -> Result<(), StdError> {
-        if app.has_component::<Tracing>() {
+        if app.has_component::<Self>() {
             // Ensure that the tracing daemon is added.
             if !app.has_daemon::<TracingDaemon>() {
                 app.add_daemon(TracingDaemon);
@@ -39,8 +39,7 @@ impl Tracing {
         let config = match app
             .get_component_ref::<Config>()
             .unwrap()
-            .get::<Option<TracingConfig>>("tracing")
-            .unwrap()
+            .get::<Option<TracingConfig>>("tracing")?
         {
             Some(v) => v,
             None => return Ok(()),
@@ -148,7 +147,7 @@ impl Default for TracingConfig {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct OtlpExporterConfig {
+pub struct TracingOtlpExporterConfig {
     #[serde(default)]
     pub service_name: Option<String>,
     #[serde(default)]
@@ -168,7 +167,7 @@ pub struct TracingConfig {
     #[serde(default)]
     pub directives: Vec<String>,
     #[serde(default)]
-    pub otlp_exporter: Option<OtlpExporterConfig>,
+    pub otlp_exporter: Option<TracingOtlpExporterConfig>,
 }
 
 impl ConfigSection for TracingConfig {

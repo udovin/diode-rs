@@ -47,7 +47,7 @@ use async_trait::async_trait;
 use clap::{Arg, ArgAction, ArgMatches};
 use diode::{App, AppBuilder};
 
-use crate::{CancellationToken, Config, RunDaemonsExt, Tracing};
+use crate::{CancellationToken, Config, Metrics, RunDaemonsExt, Tracing};
 
 /// Trait for defining CLI commands that can access the application's dependency container.
 ///
@@ -444,7 +444,7 @@ impl RunMainExt for AppBuilder {
         let cli = command_registry.build_cli();
         let matches = cli.get_matches();
         // Setup config.
-        {
+        if !self.has_component::<Config>() {
             let config_path = matches.get_one::<String>("config").unwrap();
             let mut config = Config::parse_file(config_path).await.unwrap();
             let config_override_paths = matches
@@ -458,6 +458,8 @@ impl RunMainExt for AppBuilder {
         }
         // Setup tracing.
         Tracing::build(self).unwrap();
+        // Setup metrics.
+        Metrics::build(self).unwrap();
         // Start app.
         let app = Arc::new(self.build().await.unwrap());
         command_registry.run_main(app, matches).await
