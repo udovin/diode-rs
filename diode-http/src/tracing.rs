@@ -42,16 +42,21 @@ where
         let parent_context = propagator.extract(&HeaderExtractor(headers));
         let span = tracing::info_span!("request", trace_id = tracing::field::Empty);
         span.set_parent(parent_context);
-        span.set_attribute(
-            "otel.name",
-            format!("{} {}", request.method(), request.uri()),
-        );
         span.set_attribute("otel.kind", "server");
+        if let Some(path) = request.extensions().get::<MatchedPath>() {
+            span.set_attribute(
+                "otel.name",
+                format!("{} {}", request.method(), path.as_str()),
+            );
+            span.set_attribute("http.route", path.as_str().to_string());
+        } else {
+            span.set_attribute(
+                "otel.name",
+                format!("{} {}", request.method(), request.uri()),
+            );
+        }
         span.set_attribute("http.method", request.method().to_string());
         span.set_attribute("http.target", request.uri().to_string());
-        if let Some(path) = request.extensions().get::<MatchedPath>() {
-            span.set_attribute("http.route", path.as_str().to_owned());
-        }
         let trace_id = span.context().span().span_context().trace_id();
         span.record("trace_id", trace_id.to_string());
         tracing::info!(parent: &span, method = ?request.method(), uri = ?request.uri(), "Request");
