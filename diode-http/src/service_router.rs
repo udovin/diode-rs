@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use axum::Router;
 use diode::{
-    AddServiceExt as _, App, AppBuilder, Dependencies, Plugin, Service, ServiceDependencyExt as _,
-    StdError,
+    AddServiceExt as _, App, AppBuilder, AppContext, Dependencies, Plugin, Service,
+    ServiceDependencyExt as _, StdError,
 };
 use diode_base::{AddDaemonExt as _, CancellationToken, Config, Daemon, config_section, defer};
 use serde::{Deserialize, Serialize};
@@ -66,15 +66,15 @@ pub struct ServiceServerConfig {
 pub struct ServiceServerPlugin;
 
 impl Plugin for ServiceServerPlugin {
-    async fn build(&self, app: &mut AppBuilder) -> Result<(), StdError> {
-        app.add_component(ServiceRouterRegistry::default());
-        app.add_component(HealthCheckRegistry::default());
-        let config = app
+    async fn build(&self, ctx: &AppContext) -> Result<(), StdError> {
+        ctx.add_component(ServiceRouterRegistry::default());
+        ctx.add_component(HealthCheckRegistry::default());
+        let config = ctx
             .get_component_ref::<Config>()
             .ok_or_else(|| "Config component is missing".to_string())?
             .get::<ServiceServerConfig>("service_http_server")?;
-        app.add_component(HealthClient::new(format!("http://{}", config.addr)));
-        app.add_daemon(ServiceServerDaemon { addr: config.addr });
+        ctx.add_component(HealthClient::new(format!("http://{}", config.addr)));
+        ctx.add_daemon(ServiceServerDaemon { addr: config.addr });
         Ok(())
     }
 }
@@ -87,9 +87,9 @@ impl<T> Plugin for ServiceRouterProvider<T>
 where
     T: Service<Handle = Arc<T>> + RouterBuilder + 'static,
 {
-    async fn build(&self, app: &mut AppBuilder) -> Result<(), StdError> {
-        let component = app.get_component::<T::Handle>().unwrap();
-        app.get_component_mut::<ServiceRouterRegistry>()
+    async fn build(&self, ctx: &AppContext) -> Result<(), StdError> {
+        let component = ctx.get_component::<T::Handle>().unwrap();
+        ctx.get_component_mut::<ServiceRouterRegistry>()
             .unwrap()
             .add_router(component);
         Ok(())

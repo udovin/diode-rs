@@ -1,6 +1,6 @@
 [package]
 name = "diode-http"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "HTTP services for the diode library"
@@ -11,23 +11,23 @@ default = ["macros"]
 macros = ["dep:diode-http-macros"]
 
 [dependencies]
-async-trait = "0.1.82"
-axum = "0.8.1"
-tower = "0.5.2"
-tokio = "1.38.1"
+async-trait = "0.1"
+axum = "0.8"
+tower = "0.5"
+tokio = "1"
 diode = { workspace = true }
 diode-http-macros = { workspace = true, optional = true }
 diode-base = { workspace = true }
-tracing = "0.1.41"
-opentelemetry = "0.27.1"
-tracing-opentelemetry = "0.28.0"
-opentelemetry_sdk = { version = "0.27.1", features = ["rt-tokio"] }
-serde = { version = "1.0.204", features = ["derive"] }
-reqwest = { version = "0.12.9", features = ["json"] }
+tracing = "0.1"
+opentelemetry = "0.27"
+tracing-opentelemetry = "0.28"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+serde = { version = "1", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json"] }
 
 [dev-dependencies]
-tokio = { version = "1.38.1", features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 rand = "0.8"
 futures = "0.3"
-reqwest-middleware = "0.4.2"
-reqwest-retry = { version = "0.7.0", features = ["tracing"] }
+reqwest-middleware = "0.4"
+reqwest-retry = { version = "0.7", features = ["tracing"] }

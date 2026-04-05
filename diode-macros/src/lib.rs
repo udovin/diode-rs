@@ -79,7 +79,7 @@ fn handle_derive_service(input: DeriveInput) -> TokenStream {
 
                 if let Some(extract_type) = extract_extract_type(&field.attrs) {
                     field_lets.push(quote! {
-                        let #field_ident = <#extract_type as ::diode::Extract<#field_ty>>::extract(app)?;
+                        let #field_ident = <#extract_type as ::diode::Extract<#field_ty>>::extract(ctx)?;
                     });
 
                     dependency_stmts.push(quote! {
@@ -93,7 +93,7 @@ fn handle_derive_service(input: DeriveInput) -> TokenStream {
                     });
 
                     field_lets.push(quote! {
-                        let #field_ident = app
+                        let #field_ident = ctx
                             .get_component::<<#inner_type as ::diode::Service>::Handle>()
                             .ok_or_else(|| {
                                 format!(
@@ -128,7 +128,7 @@ fn handle_derive_service(input: DeriveInput) -> TokenStream {
             type Handle = ::std::sync::Arc<Self>;
 
             async fn build(
-                app: &::diode::AppBuilder
+                ctx: &::diode::AppContext
             ) -> Result<Self::Handle, ::diode::StdError> {
                 #(#field_lets)*
                 Ok(::std::sync::Arc::new(Self {
@@ -204,6 +204,8 @@ fn handle_service_impl(input: ItemImpl) -> TokenStream {
 
     // Create cleaned inputs without extract attributes
     let mut cleaned_inputs = Vec::new();
+    let mut has_mut_ref = false;
+    let mut ref_count: usize = 0;
 
     for fn_arg in &method.sig.inputs {
         match fn_arg {
@@ -228,22 +230,36 @@ fn handle_service_impl(input: ItemImpl) -> TokenStream {
 
                 if let Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
                     let arg_name = &pat_ident.ident;
-                    arg_names.push(quote! { #arg_name });
 
                     if let Some(extract_type) = extract_extract_type(&pat_type.attrs) {
                         match arg_ty.as_ref() {
-                            Type::Reference(ref_ty) => {
+                            Type::Reference(ref_ty) if ref_ty.mutability.is_some() => {
+                                has_mut_ref = true;
+                                ref_count += 1;
+                                arg_names.push(quote! { #arg_name.deref_mut() });
                                 let inner_ty = &ref_ty.elem;
                                 arg_inits.push(quote! {
-                                    let #arg_name = <#extract_type as ::diode::ExtractRef<#inner_ty>>::extract_ref(app)?;
+                                    let mut #arg_name = <#extract_type as ::diode::ExtractMut<#inner_ty>>::extract_mut(ctx)?;
+                                });
+                                dependency_stmts.push(quote! {
+                                    deps = deps.merge(<#extract_type as ::diode::ExtractRef<#inner_ty>>::dependencies());
+                                });
+                            }
+                            Type::Reference(ref_ty) => {
+                                ref_count += 1;
+                                arg_names.push(quote! { #arg_name.deref() });
+                                let inner_ty = &ref_ty.elem;
+                                arg_inits.push(quote! {
+                                    let #arg_name = <#extract_type as ::diode::ExtractRef<#inner_ty>>::extract_ref(ctx)?;
                                 });
                                 dependency_stmts.push(quote! {
                                     deps = deps.merge(<#extract_type as ::diode::ExtractRef<#inner_ty>>::dependencies());
                                 });
                             }
                             _ => {
+                                arg_names.push(quote! { #arg_name });
                                 arg_inits.push(quote! {
-                                    let #arg_name = <#extract_type as ::diode::Extract<#arg_ty>>::extract(app)?;
+                                    let #arg_name = <#extract_type as ::diode::Extract<#arg_ty>>::extract(ctx)?;
                                 });
                                 dependency_stmts.push(quote! {
                                     deps = deps.merge(<#extract_type as ::diode::Extract<#arg_ty>>::dependencies());
@@ -251,12 +267,13 @@ fn handle_service_impl(input: ItemImpl) -> TokenStream {
                             }
                         };
                     } else if let Some(inner_type) = extract_arc_type(arg_ty) {
+                        arg_names.push(quote! { #arg_name });
                         dependency_stmts.push(quote! {
                             deps = deps.service::<#inner_type>();
                         });
 
                         arg_inits.push(quote! {
-                            let #arg_name = app
+                            let #arg_name = ctx
                                 .get_component::<<#inner_type as ::diode::Service>::Handle>()
                                 .ok_or_else(|| {
                                     format!(
@@ -284,6 +301,19 @@ fn handle_service_impl(input: ItemImpl) -> TokenStream {
                 }
             }
         }
+    }
+
+    if has_mut_ref && ref_count > 1 {
+        return TokenStream::from(
+            Error::new(
+                method.sig.span(),
+                "Combining a `&mut` inject parameter with other `&` or `&mut` inject parameters \
+                 may cause a deadlock. Use `#[inject(AppContext)] ctx: &AppContext` and call \
+                 `get_component_ref`/`get_component_mut` manually, ensuring that guards do not \
+                 overlap.",
+            )
+            .to_compile_error(),
+        );
     }
 
     // Create cleaned input with extract and new attributes removed
@@ -332,8 +362,9 @@ fn handle_service_impl(input: ItemImpl) -> TokenStream {
             type Handle = #handle_type;
 
             async fn build(
-                app: &::diode::AppBuilder
+                ctx: &::diode::AppContext
             ) -> Result<Self::Handle, ::diode::StdError> {
+                use ::std::ops::{Deref as _, DerefMut as _};
                 #build_body
             }
 

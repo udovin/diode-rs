@@ -5,8 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::Router;
 use diode::{
-    AddServiceExt as _, App, AppBuilder, Dependencies, Plugin, Service, ServiceDependencyExt as _,
-    StdError,
+    AddServiceExt as _, App, AppBuilder, AppContext, Dependencies, Plugin, Service,
+    ServiceDependencyExt as _, StdError,
 };
 use diode_base::{AddDaemonExt as _, CancellationToken, Config, Daemon, config_section, defer};
 use serde::{Deserialize, Serialize};
@@ -66,13 +66,13 @@ pub struct HttpServerConfig {
 pub struct HttpServerPlugin;
 
 impl Plugin for HttpServerPlugin {
-    async fn build(&self, app: &mut AppBuilder) -> Result<(), StdError> {
-        app.add_component(RouterRegistry::default());
-        let config = app
+    async fn build(&self, ctx: &AppContext) -> Result<(), StdError> {
+        ctx.add_component(RouterRegistry::default());
+        let config = ctx
             .get_component_ref::<Config>()
             .ok_or_else(|| "Config component is missing".to_string())?
             .get::<HttpServerConfig>("http_server")?;
-        app.add_daemon(ServerDaemon { addr: config.addr });
+        ctx.add_daemon(ServerDaemon { addr: config.addr });
         Ok(())
     }
 }
@@ -101,9 +101,9 @@ impl<T> Plugin for RouterProvider<T>
 where
     T: Service<Handle = Arc<T>> + RouterBuilder + 'static,
 {
-    async fn build(&self, app: &mut AppBuilder) -> Result<(), StdError> {
-        let component = app.get_component::<T::Handle>().unwrap();
-        app.get_component_mut::<RouterRegistry>()
+    async fn build(&self, ctx: &AppContext) -> Result<(), StdError> {
+        let component = ctx.get_component::<T::Handle>().unwrap();
+        ctx.get_component_mut::<RouterRegistry>()
             .unwrap()
             .add_router(component);
         Ok(())

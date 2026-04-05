@@ -2,15 +2,15 @@ use tracing::Instrument;
 
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
+use std::ops::Deref;
 use std::path::PathBuf;
-use std::sync::{
-    Arc, RwLock,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::time::Duration;
 
 use diode::{
-    AddServiceExt, App, AppBuilder, Dependencies, Plugin, Service, ServiceDependencyExt, StdError,
+    AddServiceExt, App, AppBuilder, AppContext, Dependencies, Plugin, Service,
+    ServiceDependencyExt, StdError,
 };
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use tokio_util::sync::CancellationToken;
@@ -46,13 +46,17 @@ pub struct DynamicConfig {
     /// Flag indicating cache needs to be written to disk
     cache_dirty: Arc<AtomicBool>,
     /// Event subscribers for configuration changes
-    subscribers:
-        RwLock<BTreeMap<String, Vec<Box<dyn Fn(Option<&serde_json::Value>) + Send + Sync>>>>,
+    subscribers: RwLock<BTreeMap<String, Vec<SubscriberFn>>>,
 }
 
+type SubscriberFn = Box<dyn Fn(Option<&serde_json::Value>) + Send + Sync>;
+
 impl DynamicConfig {
-    /// Get configuration value by key
-    pub fn get<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
+    /// Get current configuration value by key
+    pub fn get<T>(&self, key: &str) -> Option<T>
+    where
+        T: DeserializeOwned,
+    {
         tracing::trace!(key = key, "Getting dynamic config value");
         let cache = self.cache.read().unwrap();
         let value = cache.get(key).or_else(|| self.fallback.get(key));
@@ -64,6 +68,22 @@ impl DynamicConfig {
                 })
                 .ok()
         })
+    }
+
+    pub fn get_dynamic<T>(&self, key: &str) -> DynamicValue<T>
+    where
+        T: DeserializeOwned + Send + Sync + 'static,
+    {
+        let value = Arc::new(RwLock::new(None));
+        let subscriber = {
+            let value = value.clone();
+            move |v: Option<T>| {
+                let mut value = value.write().unwrap();
+                *value = v;
+            }
+        };
+        self.subscribe(key, subscriber);
+        DynamicValue { value }
     }
 
     /// Subscribe to configuration changes for a specific key
@@ -98,7 +118,7 @@ impl DynamicConfig {
     }
 
     /// Update configuration snapshot (internal method for providers)
-    pub fn update_snapshot(&self, snapshot: BTreeMap<String, serde_json::Value>) {
+    fn set_snapshot(&self, snapshot: BTreeMap<String, serde_json::Value>) {
         tracing::debug!("Updating dynamic config snapshot");
         let mut cache = self.cache.write().unwrap();
         let mut changed_keys = Vec::new();
@@ -186,6 +206,40 @@ impl DynamicConfig {
     }
 }
 
+pub struct DynamicValue<T> {
+    value: Arc<RwLock<Option<T>>>,
+}
+
+impl<T> DynamicValue<T>
+where
+    T: Clone,
+{
+    pub fn get(&self) -> DynamicValueGuard<'_, T> {
+        DynamicValueGuard {
+            guard: self.value.read().unwrap(),
+        }
+    }
+
+    pub fn get_cloned(&self) -> Option<T>
+    where
+        T: Clone,
+    {
+        self.value.read().unwrap().clone()
+    }
+}
+
+pub struct DynamicValueGuard<'a, T> {
+    guard: RwLockReadGuard<'a, Option<T>>,
+}
+
+impl<T> Deref for DynamicValueGuard<'_, T> {
+    type Target = Option<T>;
+
+    fn deref(&self) -> &Option<T> {
+        self.guard.deref()
+    }
+}
+
 /// Custom deserializer for optional Duration that supports string format like "1s", "100ms", etc.
 fn deserialize_duration_option<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
 where
@@ -241,7 +295,7 @@ pub struct DynamicConfigUpdater {
 impl DynamicConfigUpdater {
     /// Update entire configuration snapshot
     pub fn set_snapshot(&self, snapshot: BTreeMap<String, serde_json::Value>) {
-        self.config.update_snapshot(snapshot);
+        self.config.set_snapshot(snapshot);
     }
 
     /// Update single configuration key
@@ -261,10 +315,10 @@ impl<T> Plugin for DynamicConfigProvider<T>
 where
     T: DynamicConfigService + 'static,
 {
-    /// Apply the dynamic config plugin to the app builder
-    async fn build(&self, app: &mut AppBuilder) -> Result<(), StdError> {
+    /// Apply the dynamic config plugin to the app context
+    async fn build(&self, ctx: &AppContext) -> Result<(), StdError> {
         // Get plugin configuration
-        let config = app
+        let config = ctx
             .get_component_ref::<Config>()
             .unwrap()
             .get::<DynamicConfigConfig>("dynamic_config")
@@ -275,7 +329,7 @@ where
             None => BTreeMap::new(),
         };
         // Get config service
-        let service = app.get_component::<T::Handle>();
+        let service = ctx.get_component::<T::Handle>();
         // Get cache config
         let cache = match &config.cache_path {
             Some(path) => match load_dynamic_config(path).await {
@@ -304,12 +358,12 @@ where
             cache_dirty: Arc::new(AtomicBool::new(cache_dirty)),
             subscribers: Default::default(),
         });
-        app.add_component(dynamic_config.clone())
-            .add_daemon(DynamicConfigDaemon {
-                dynamic_config,
-                service,
-                config,
-            });
+        ctx.add_component(dynamic_config.clone());
+        ctx.add_daemon(DynamicConfigDaemon {
+            dynamic_config,
+            service,
+            config,
+        });
         Ok(())
     }
 
@@ -343,7 +397,7 @@ where
             match service.get_snapshot().await {
                 Ok(snapshot) => {
                     tracing::info!(parent: &span, "Loaded initial snapshot from provider");
-                    dynamic_config.update_snapshot(snapshot);
+                    dynamic_config.set_snapshot(snapshot);
                 }
                 Err(e) => {
                     tracing::warn!(parent: &span, error = %e, "Failed to get initial snapshot from provider");

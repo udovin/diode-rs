@@ -4,7 +4,7 @@ use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::Duration;
 
-use diode::{App, AppBuilder, StdError};
+use diode::{App, AppContext, StdError};
 use duration_str::deserialize_option_duration;
 use opentelemetry::trace::{SpanKind, TracerProvider as _};
 use opentelemetry::{Key, KeyValue};
@@ -28,15 +28,15 @@ pub struct Tracing {
 }
 
 impl Tracing {
-    pub fn build(app: &mut AppBuilder) -> Result<(), StdError> {
-        if app.has_component::<Self>() {
+    pub fn build(ctx: &AppContext) -> Result<(), StdError> {
+        if ctx.has_component::<Self>() {
             // Ensure that the tracing daemon is added.
-            if !app.has_daemon::<TracingDaemon>() {
-                app.add_daemon(TracingDaemon);
+            if !ctx.has_daemon::<TracingDaemon>() {
+                ctx.add_daemon(TracingDaemon);
             }
             return Ok(());
         }
-        let config = match app
+        let config = match ctx
             .get_component_ref::<Config>()
             .unwrap()
             .get::<Option<TracingConfig>>("tracing")?
@@ -85,13 +85,13 @@ impl Tracing {
             .with(tracing_opentelemetry::layer().with_tracer(tracer_provider.tracer("")))
             .init();
         // Add app components.
-        app.add_component(Self {
+        ctx.add_component(Self {
             default_level: config.level,
             directives,
             reload_handle,
             tracer_provider,
         });
-        app.add_daemon(TracingDaemon);
+        ctx.add_daemon(TracingDaemon);
         Ok(())
     }
 }

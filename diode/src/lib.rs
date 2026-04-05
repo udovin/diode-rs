@@ -26,7 +26,7 @@
 //! impl Service for DatabaseService {
 //!     type Handle = Arc<Self>;
 //!
-//!     async fn build(_app: &diode::AppBuilder) -> Result<Self::Handle, StdError> {
+//!     async fn build(_app: &diode::AppContext) -> Result<Self::Handle, StdError> {
 //!         Ok(Arc::new(Self {
 //!             connection_string: "sqlite::memory:".to_string(),
 //!         }))
@@ -69,7 +69,7 @@
 //! impl Service for ConfigService {
 //!     type Handle = Arc<Self>;
 //!
-//!     async fn build(_app: &diode::AppBuilder) -> Result<Self::Handle, StdError> {
+//!     async fn build(_app: &diode::AppContext) -> Result<Self::Handle, StdError> {
 //!         Ok(Arc::new(Self {
 //!             database_url: "postgresql://localhost:5432/mydb".to_string(),
 //!         }))
@@ -79,7 +79,7 @@
 //! impl Service for DatabaseService {
 //!     type Handle = Arc<Self>;
 //!
-//!     async fn build(app: &diode::AppBuilder) -> Result<Self::Handle, StdError> {
+//!     async fn build(app: &diode::AppContext) -> Result<Self::Handle, StdError> {
 //!         let config = app.get_component::<Arc<ConfigService>>()
 //!             .ok_or("ConfigService not found")?;
 //!
@@ -94,7 +94,7 @@
 //! impl Service for ApiService {
 //!     type Handle = Arc<Self>;
 //!
-//!     async fn build(app: &diode::AppBuilder) -> Result<Self::Handle, StdError> {
+//!     async fn build(app: &diode::AppContext) -> Result<Self::Handle, StdError> {
 //!         let database = app.get_component::<Arc<DatabaseService>>()
 //!             .ok_or("DatabaseService not found")?;
 //!
@@ -127,16 +127,16 @@
 //! For more complex initialization logic, use plugins:
 //!
 //! ```rust
-//! use diode::{App, Plugin, Dependencies, StdError, AppBuilder};
+//! use diode::{App, Plugin, Dependencies, StdError, AppContext};
 //!
 //! struct DatabasePlugin {
 //!     connection_string: String,
 //! }
 //!
 //! impl Plugin for DatabasePlugin {
-//!     async fn build(&self, app: &mut AppBuilder) -> Result<(), StdError> {
+//!     async fn build(&self, ctx: &AppContext) -> Result<(), StdError> {
 //!         // Register components or perform complex initialization
-//!         app.add_component(self.connection_string.clone());
+//!         ctx.add_component(self.connection_string.clone());
 //!         Ok(())
 //!     }
 //! }
@@ -195,11 +195,17 @@
 //! - `macros` (default): Enables procedural macros for simplified service definitions
 
 mod app;
+mod builder;
+mod context;
 mod inject;
+mod plugin;
 mod service;
 
 pub use app::*;
+pub use builder::*;
+pub use context::*;
 pub use inject::*;
+pub use plugin::*;
 pub use service::*;
 
 #[cfg(feature = "macros")]

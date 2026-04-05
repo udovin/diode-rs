@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use axum::{Router, routing};
 use diode::{
-    AddServiceExt as _, App, AppBuilder, Dependencies, Plugin, Service, ServiceDependencyExt as _,
-    StdError,
+    AddServiceExt as _, App, AppBuilder, AppContext, Dependencies, Plugin, Service,
+    ServiceDependencyExt as _, StdError,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -65,9 +65,9 @@ impl<T> Plugin for HealthCheckProvider<T>
 where
     T: Service<Handle = Arc<T>> + HealthCheck + 'static,
 {
-    async fn build(&self, app: &mut AppBuilder) -> Result<(), StdError> {
-        let component = app.get_component::<T::Handle>().unwrap();
-        app.get_component_mut::<HealthCheckRegistry>()
+    async fn build(&self, ctx: &AppContext) -> Result<(), StdError> {
+        let component = ctx.get_component::<T::Handle>().unwrap();
+        ctx.get_component_mut::<HealthCheckRegistry>()
             .unwrap()
             .add_health_check(component);
         Ok(())

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use diode::{AppBuilder, StdError};
+use diode::{AppContext, StdError};
 use duration_str::deserialize_option_duration;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
@@ -15,11 +15,11 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn build(app: &mut AppBuilder) -> Result<(), StdError> {
-        if app.has_component::<Self>() {
+    pub fn build(ctx: &AppContext) -> Result<(), StdError> {
+        if ctx.has_component::<Self>() {
             return Ok(());
         }
-        let config = match app
+        let config = match ctx
             .get_component_ref::<Config>()
             .unwrap()
             .get::<Option<MetricsConfig>>("metrics")?
@@ -63,7 +63,7 @@ impl Metrics {
         // Setup meter provider.
         opentelemetry::global::set_meter_provider(meter_provider.clone());
         // Add app components.
-        app.add_component(Self { meter_provider });
+        ctx.add_component(Self { meter_provider });
         Ok(())
     }
 }

@@ -5,7 +5,8 @@ use std::{marker::PhantomData, sync::Arc};
 use axum::response::Response;
 use axum::{extract::Request, response::IntoResponse};
 use diode::{
-    AddServiceExt as _, AppBuilder, Dependencies, Plugin, Service, ServiceDependencyExt as _,
+    AddServiceExt as _, AppBuilder, AppContext, Dependencies, Plugin, Service,
+    ServiceDependencyExt as _,
 };
 
 pub trait Next: Send + Sync {
@@ -117,7 +118,7 @@ impl<T> Plugin for MiddlewareProvider<T>
 where
     T: MiddlewareService + 'static,
 {
-    async fn build(&self, _app: &mut AppBuilder) -> Result<(), diode::StdError> {
+    async fn build(&self, _ctx: &AppContext) -> Result<(), diode::StdError> {
         Ok(())
     }
 

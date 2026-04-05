@@ -1,6 +1,6 @@
 [package]
 name = "diode"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Core diode library"
@@ -11,8 +11,9 @@ default = ["macros"]
 macros = ["dep:diode-macros"]
 
 [dependencies]
-async-trait = "0.1.82"
+async-trait = "0.1"
+dashmap = "6"
 diode-macros = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.38.1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt"] }

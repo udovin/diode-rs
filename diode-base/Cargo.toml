@@ -1,6 +1,6 @@
 [package]
 name = "diode-base"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Basic services for the diode library"
@@ -11,24 +11,24 @@ default = ["macros"]
 macros = ["dep:diode-base-macros"]
 
 [dependencies]
-async-trait = "0.1.82"
-tokio = { version = "1.38.1", features = ["fs", "rt", "signal"] }
-tokio-util = "0.7.11"
+async-trait = "0.1"
+tokio = { version = "1", features = ["fs", "rt", "signal"] }
+tokio-util = "0.7"
 diode = { workspace = true }
 diode-base-macros = { workspace = true, optional = true }
-serde = { version = "1.0.204", features = ["derive"] }
-serde_json = "1.0.120"
-clap = "4.0"
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-opentelemetry = "0.27.1"
-tracing-opentelemetry = "0.28.0"
-opentelemetry_sdk = { version = "0.27.1", features = ["rt-tokio"] }
-opentelemetry-otlp = "0.27.0"
-duration-str = "0.12.0"
-notify = "6.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = "4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+opentelemetry = "0.27"
+tracing-opentelemetry = "0.28"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = "0.27"
+duration-str = "0.12"
+notify = "6"
 rand = "0.8"
 
 [dev-dependencies]
-tempfile = "3.8"
-tokio = { version = "1.38.1", features = ["fs", "rt", "signal", "macros", "time"] }
+tempfile = "3"
+tokio = { version = "1", features = ["fs", "rt", "signal", "macros", "time"] }

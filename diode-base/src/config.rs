@@ -84,8 +84,8 @@ impl<T> Extract<T> for Config
 where
     T: ConfigSection,
 {
-    fn extract(app: &diode::AppBuilder) -> Result<T, diode::AppError> {
-        Ok(app
+    fn extract(ctx: &diode::AppContext) -> Result<T, diode::AppError> {
+        Ok(ctx
             .get_component_ref::<Config>()
             .unwrap()
             .get::<T>(T::key())

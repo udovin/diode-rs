@@ -440,7 +440,7 @@ impl RunMainExt for AppBuilder {
             self.add_command::<ConfigCommand>();
         }
         // Setup cli.
-        let command_registry = take(self.get_component_mut::<CommandRegistry>().unwrap());
+        let command_registry = take(&mut *self.get_component_mut::<CommandRegistry>().unwrap());
         let cli = command_registry.build_cli();
         let matches = cli.get_matches();
         // Setup config.
@@ -457,9 +457,9 @@ impl RunMainExt for AppBuilder {
             self.add_component(config);
         }
         // Setup tracing.
-        Tracing::build(self).unwrap();
+        Tracing::build(&*self).unwrap();
         // Setup metrics.
-        Metrics::build(self).unwrap();
+        Metrics::build(&*self).unwrap();
         // Start app.
         let app = Arc::new(self.build().await.unwrap());
         command_registry.run_main(app, matches).await

@@ -1,4 +1,4 @@
-use diode::{AddServiceExt as _, App, AppBuilder, Component, Service, StdError, service};
+use diode::{AddServiceExt as _, App, AppContext, Component, Service, StdError, service};
 use std::sync::Arc;
 
 #[derive(Clone, Default)]
@@ -12,7 +12,7 @@ struct SimpleService;
 impl Service for SimpleService {
     type Handle = Self;
 
-    async fn build(_app: &AppBuilder) -> Result<Self::Handle, StdError> {
+    async fn build(_ctx: &AppContext) -> Result<Self::Handle, StdError> {
         Ok(Self)
     }
 }
@@ -55,7 +55,7 @@ struct CustomService;
 impl Service for CustomService {
     type Handle = Box<str>;
 
-    async fn build(_app: &AppBuilder) -> Result<Self::Handle, StdError> {
+    async fn build(_ctx: &AppContext) -> Result<Self::Handle, StdError> {
         Ok("CustomService".into())
     }
 }

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use diode::{App, AppBuilder, StdError};
+use diode::{App, AppContext, StdError};
 use tokio::task::JoinSet;
 
 pub use tokio_util::sync::CancellationToken;
@@ -114,7 +114,7 @@ impl RunDaemonsExt for Arc<App> {
 }
 
 pub trait AddDaemonExt {
-    fn add_daemon<T>(&mut self, daemon: impl Into<Arc<T>>) -> &mut Self
+    fn add_daemon<T>(&self, daemon: impl Into<Arc<T>>)
     where
         T: Daemon + 'static;
 
@@ -123,8 +123,8 @@ pub trait AddDaemonExt {
         T: Daemon + 'static;
 }
 
-impl AddDaemonExt for AppBuilder {
-    fn add_daemon<T>(&mut self, daemon: impl Into<Arc<T>>) -> &mut Self
+impl AddDaemonExt for AppContext {
+    fn add_daemon<T>(&self, daemon: impl Into<Arc<T>>)
     where
         T: Daemon + 'static,
     {
@@ -134,7 +134,6 @@ impl AddDaemonExt for AppBuilder {
         self.get_component_mut::<DaemonRegistry>()
             .unwrap()
             .add_daemon(daemon.into());
-        self
     }
 
     fn has_daemon<T>(&self) -> bool
