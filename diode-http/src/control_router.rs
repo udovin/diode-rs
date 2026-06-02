@@ -12,17 +12,14 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 
 use crate::tracing::TracingLayer;
-
-pub trait RouterBuilder: Send + Sync {
-    fn build_router(self: Arc<Self>, app: &App) -> Router;
-}
+use crate::{HealthCheckRegistry, HealthClient, RouterBuilder};
 
 #[derive(Default)]
-struct RouterRegistry {
+struct ControlRouterRegistry {
     routers: Vec<Arc<dyn RouterBuilder>>,
 }
 
-impl RouterRegistry {
+impl ControlRouterRegistry {
     fn add_router<T: RouterBuilder + 'static>(&mut self, router: Arc<T>) {
         self.routers.push(router);
     }
@@ -34,24 +31,24 @@ impl RouterRegistry {
     }
 }
 
-struct ServerDaemon {
+struct ControlServerDaemon {
     addr: SocketAddr,
 }
 
-impl Daemon for ServerDaemon {
+impl Daemon for ControlServerDaemon {
     async fn run(&self, app: &App, shutdown: CancellationToken) -> Result<(), StdError> {
-        let span = tracing::info_span!("http_server", addr = ?self.addr);
+        let span = tracing::info_span!("control_server", addr = ?self.addr);
         let router = app
-            .get_component_ref::<RouterRegistry>()
+            .get_component_ref::<ControlRouterRegistry>()
             .unwrap()
             .build_router(app)
             .layer(TracingLayer);
-        tracing::info!(parent: &span, "Server starting");
+        tracing::info!(parent: &span, "Control server starting");
         defer! {
-            tracing::info!(parent: &span, "Server stopped")
+            tracing::info!(parent: &span, "Control server stopped")
         };
         let listener = TcpListener::bind(self.addr).await.map_err(Box::new)?;
-        tracing::info!(parent: &span, "Server started");
+        tracing::info!(parent: &span, "Control server started");
         axum::serve(listener, router)
             .with_graceful_shutdown(shutdown.cancelled_owned())
             .await
@@ -61,36 +58,40 @@ impl Daemon for ServerDaemon {
 }
 
 #[derive(Serialize, Deserialize)]
-#[config_section("http_server")]
-pub struct HttpServerConfig {
+#[config_section("control_server")]
+pub struct ControlServerConfig {
     pub addr: SocketAddr,
 }
 
-pub struct HttpServerPlugin;
+pub struct ControlServerPlugin;
 
-impl Plugin for HttpServerPlugin {
+impl Plugin for ControlServerPlugin {
     async fn build(&self, ctx: &AppContext) -> Result<(), StdError> {
-        if !ctx.has_component::<RouterRegistry>() {
-            ctx.add_component(RouterRegistry::default());
+        if !ctx.has_component::<ControlRouterRegistry>() {
+            ctx.add_component(ControlRouterRegistry::default());
+        }
+        if !ctx.has_component::<HealthCheckRegistry>() {
+            ctx.add_component(HealthCheckRegistry::default());
         }
         let config = ctx
             .get_component_ref::<Config>()
             .ok_or_else(|| "Config component is missing".to_string())?
-            .get::<HttpServerConfig>("http_server")?;
-        ctx.add_daemon(ServerDaemon { addr: config.addr });
+            .get::<ControlServerConfig>("control_server")?;
+        ctx.add_component(HealthClient::new(format!("http://{}/health", config.addr)));
+        ctx.add_daemon(ControlServerDaemon { addr: config.addr });
         Ok(())
     }
 }
 
-struct RouterProvider<T>(PhantomData<T>);
+struct ControlRouterProvider<T>(PhantomData<T>);
 
-impl<T> Plugin for RouterProvider<T>
+impl<T> Plugin for ControlRouterProvider<T>
 where
     T: Service<Handle = Arc<T>> + RouterBuilder + 'static,
 {
     async fn build(&self, ctx: &AppContext) -> Result<(), StdError> {
         let component = ctx.get_component::<T::Handle>().unwrap();
-        ctx.get_component_mut::<RouterRegistry>()
+        ctx.get_component_mut::<ControlRouterRegistry>()
             .unwrap()
             .add_router(component);
         Ok(())
@@ -99,57 +100,58 @@ where
     fn dependencies(&self) -> Dependencies {
         T::dependencies()
             .service::<T>()
-            .plugin::<HttpServerPlugin>()
+            .plugin::<ControlServerPlugin>()
     }
 }
 
-pub trait AddRouterExt {
-    fn add_router<T>(&mut self, router: impl Into<Arc<T>>) -> &mut Self
+pub trait AddControlRouterExt {
+    fn add_control_router<T>(&mut self, router: impl Into<Arc<T>>) -> &mut Self
     where
         T: RouterBuilder + 'static;
 }
 
-impl AddRouterExt for AppBuilder {
-    fn add_router<T>(&mut self, router: impl Into<Arc<T>>) -> &mut Self
+impl AddControlRouterExt for AppBuilder {
+    fn add_control_router<T>(&mut self, router: impl Into<Arc<T>>) -> &mut Self
     where
         T: RouterBuilder + 'static,
     {
-        if !self.has_component::<RouterRegistry>() {
-            self.add_component(RouterRegistry::default());
+        if !self.has_component::<ControlRouterRegistry>() {
+            self.add_component(ControlRouterRegistry::default());
         }
-        self.get_component_mut::<RouterRegistry>()
+        self.get_component_mut::<ControlRouterRegistry>()
             .unwrap()
             .add_router(router.into());
         self
     }
 }
 
-pub trait AddRouterServiceExt {
-    fn add_router_service<T>(&mut self) -> &mut Self
+pub trait AddControlRouterServiceExt {
+    /// Registers a router resolved from a DI [`Service`] on the control server.
+    fn add_control_router_service<T>(&mut self) -> &mut Self
     where
         T: Service<Handle = Arc<T>> + RouterBuilder + 'static;
 
-    fn has_router_service<T>(&self) -> bool
+    fn has_control_router_service<T>(&self) -> bool
     where
         T: Service<Handle = Arc<T>> + RouterBuilder + 'static;
 }
 
-impl AddRouterServiceExt for AppBuilder {
-    fn add_router_service<T>(&mut self) -> &mut Self
+impl AddControlRouterServiceExt for AppBuilder {
+    fn add_control_router_service<T>(&mut self) -> &mut Self
     where
         T: Service<Handle = Arc<T>> + RouterBuilder + 'static,
     {
         if !self.has_service::<T>() {
             self.add_service::<T>();
         }
-        self.add_plugin(RouterProvider::<T>(PhantomData));
+        self.add_plugin(ControlRouterProvider::<T>(PhantomData));
         self
     }
 
-    fn has_router_service<T>(&self) -> bool
+    fn has_control_router_service<T>(&self) -> bool
     where
         T: Service<Handle = Arc<T>> + RouterBuilder + 'static,
     {
-        self.has_plugin::<RouterProvider<T>>()
+        self.has_plugin::<ControlRouterProvider<T>>()
     }
 }

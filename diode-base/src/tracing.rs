@@ -30,10 +30,6 @@ pub struct Tracing {
 impl Tracing {
     pub fn build(ctx: &AppContext) -> Result<(), StdError> {
         if ctx.has_component::<Self>() {
-            // Ensure that the tracing daemon is added.
-            if !ctx.has_daemon::<TracingDaemon>() {
-                ctx.add_daemon(TracingDaemon);
-            }
             return Ok(());
         }
         let config = match ctx

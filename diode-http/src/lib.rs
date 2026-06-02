@@ -1,13 +1,13 @@
+mod control_router;
 mod health_check;
 mod middleware;
 mod router;
-mod service_router;
 mod tracing;
 
+pub use control_router::*;
 pub use health_check::*;
 pub use middleware::*;
 pub use router::*;
-pub use service_router::*;
 
 pub use axum;
 

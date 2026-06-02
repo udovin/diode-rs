@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::sync::Arc;
 
 use axum::http::status::StatusCode;
 use axum::response::IntoResponse;
@@ -9,9 +10,11 @@ use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
 use diode::{App, Service};
 use diode_base::{CancellationToken, Config, RunDaemonsExt as _};
 use diode_http::{
-    AddHealthCheckExt, AddMiddlewareExt, AddRouterExt, AddServiceRouterExt as _, HealthCheck,
-    HealthRouter, HttpServerConfig, HttpServerPlugin, MiddlewareService, Next, Request, Response,
-    ServiceServerConfig, ServiceServerPlugin, router,
+    AddControlRouterServiceExt as _, AddHealthCheckExt, AddHealthCheckServiceExt as _,
+    AddMiddlewareExt, AddRouterExt, AddRouterServiceExt as _, ControlServerConfig,
+    ControlServerPlugin, HealthCheck, HealthClient, HealthRouter, HttpServerConfig,
+    HttpServerPlugin, MiddlewareService, Next, Request, Response, Router, RouterBuilder, router,
+    routing,
 };
 
 #[derive(Service)]
@@ -73,7 +76,7 @@ async fn test_example_router_and_middleware() {
 
     let app = App::builder()
         .add_plugin(HttpServerPlugin)
-        .add_router::<ExampleRouter>()
+        .add_router_service::<ExampleRouter>()
         .add_middleware::<AuthMiddleware>()
         .add_middleware::<ReqIdMiddleware>()
         .add_component(Config::new().with(
@@ -141,11 +144,11 @@ async fn test_service_server() {
     let server_port = FreePort::new();
 
     let app = App::builder()
-        .add_plugin(ServiceServerPlugin)
-        .add_service_router::<HealthRouter>()
+        .add_plugin(ControlServerPlugin)
+        .add_control_router_service::<HealthRouter>()
         .add_component(Config::new().with(
-            "service_http_server",
-            ServiceServerConfig {
+            "control_server",
+            ControlServerConfig {
                 addr: server_port.as_addr(),
             },
         ))
@@ -197,12 +200,12 @@ async fn test_unhealthy_service() {
     let server_port = FreePort::new();
 
     let app = App::builder()
-        .add_plugin(ServiceServerPlugin)
-        .add_service_router::<HealthRouter>()
-        .add_health_check::<BadHealthCheckService>()
+        .add_plugin(ControlServerPlugin)
+        .add_control_router_service::<HealthRouter>()
+        .add_health_check_service::<BadHealthCheckService>()
         .add_component(Config::new().with(
-            "service_http_server",
-            ServiceServerConfig {
+            "control_server",
+            ControlServerConfig {
                 addr: server_port.as_addr(),
             },
         ))
@@ -234,6 +237,174 @@ async fn test_unhealthy_service() {
         body,
         "{\"name\":\"bad_health_check\",\"message\":\"Bad health check\"}"
     );
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), server_task).await;
+}
+
+struct GreetRouter {
+    greeting: String,
+}
+
+impl RouterBuilder for GreetRouter {
+    fn build_router(self: Arc<Self>, _app: &App) -> Router {
+        Router::new().route(
+            "/greet",
+            routing::get(move || async move { self.greeting.clone() }),
+        )
+    }
+}
+
+#[tokio::test]
+async fn test_router_instance() {
+    let server_port = FreePort::new();
+
+    let app = App::builder()
+        .add_plugin(HttpServerPlugin)
+        .add_router(GreetRouter {
+            greeting: "hi there".to_string(),
+        })
+        .add_component(Config::new().with(
+            "http_server",
+            HttpServerConfig {
+                addr: server_port.as_addr(),
+            },
+        ))
+        .build()
+        .await
+        .unwrap();
+
+    let shutdown = CancellationToken::new();
+
+    let shutdown_clone = shutdown.clone();
+    let server_task = tokio::spawn(async move { app.run_daemons(shutdown_clone).await });
+
+    let retry_policy = ExponentialBackoff::builder().build_with_max_retries(3);
+    let client = ClientBuilder::new(reqwest::Client::new())
+        .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+        .build();
+
+    let base_url = format!("http://{}", server_port.as_addr());
+
+    let response = client
+        .get(&format!("{}/greet", base_url))
+        .send()
+        .await
+        .expect("Failed to send request");
+
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("Failed to read response body");
+    assert_eq!(body, "hi there");
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), server_task).await;
+}
+
+struct FailingHealthCheck {
+    name: String,
+    message: String,
+}
+
+impl HealthCheck for FailingHealthCheck {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn health_check(&self) -> Result<(), diode::StdError> {
+        Err(self.message.clone().into())
+    }
+}
+
+#[tokio::test]
+async fn test_unhealthy_instance() {
+    let server_port = FreePort::new();
+
+    let app = App::builder()
+        .add_plugin(ControlServerPlugin)
+        .add_control_router_service::<HealthRouter>()
+        .add_health_check(FailingHealthCheck {
+            name: "disk".to_string(),
+            message: "disk full".to_string(),
+        })
+        .add_component(Config::new().with(
+            "control_server",
+            ControlServerConfig {
+                addr: server_port.as_addr(),
+            },
+        ))
+        .build()
+        .await
+        .unwrap();
+
+    let shutdown = CancellationToken::new();
+
+    let shutdown_clone = shutdown.clone();
+    let server_task = tokio::spawn(async move { app.run_daemons(shutdown_clone).await });
+
+    let retry_policy = ExponentialBackoff::builder().build_with_max_retries(3);
+    let client = ClientBuilder::new(reqwest::Client::new())
+        .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+        .build();
+
+    let base_url = format!("http://{}", server_port.as_addr());
+
+    let response = client
+        .get(&format!("{}/health", base_url))
+        .send()
+        .await
+        .expect("Failed to send request");
+
+    assert_eq!(response.status(), 500);
+    let body = response.text().await.expect("Failed to read response body");
+    assert_eq!(body, "{\"name\":\"disk\",\"message\":\"disk full\"}");
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), server_task).await;
+}
+
+#[tokio::test]
+async fn test_health_client() {
+    let server_port = FreePort::new();
+
+    let app = App::builder()
+        .add_plugin(ControlServerPlugin)
+        .add_control_router_service::<HealthRouter>()
+        .add_component(Config::new().with(
+            "control_server",
+            ControlServerConfig {
+                addr: server_port.as_addr(),
+            },
+        ))
+        .build()
+        .await
+        .unwrap();
+
+    // The HealthClient component points at this server and is meant to probe its
+    // /health endpoint.
+    let health_client = app.get_component::<HealthClient>().unwrap();
+
+    let shutdown = CancellationToken::new();
+
+    let shutdown_clone = shutdown.clone();
+    let server_task = tokio::spawn(async move { app.run_daemons(shutdown_clone).await });
+
+    // Make sure the server is actually listening before probing, so the only
+    // possible failure is the health check itself (not startup timing).
+    let retry_policy = ExponentialBackoff::builder().build_with_max_retries(5);
+    let client = ClientBuilder::new(reqwest::Client::new())
+        .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+        .build();
+    let base_url = format!("http://{}", server_port.as_addr());
+    let ready = client
+        .get(&format!("{}/health", base_url))
+        .send()
+        .await
+        .expect("Failed to send readiness request");
+    assert_eq!(ready.status(), 200);
+
+    // HealthClient targets the same running server and should report healthy.
+    let result = health_client.health_check().await;
+    assert!(result.is_ok(), "HealthClient::health_check failed: {result:?}");
 
     shutdown.cancel();
     let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), server_task).await;

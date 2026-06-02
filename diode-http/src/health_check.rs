@@ -11,14 +11,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{RouterBuilder, ServiceServerPlugin};
+use crate::{ControlServerPlugin, RouterBuilder};
 
 #[derive(Default)]
 pub(crate) struct HealthCheckRegistry {
     health_checks: Vec<Arc<dyn DynHealthCheck>>,
 }
 
-#[allow(unused)]
 impl HealthCheckRegistry {
     pub fn add_health_check<T>(&mut self, health_check: Arc<T>)
     where
@@ -59,9 +58,9 @@ where
     }
 }
 
-struct HealthCheckProvider<T>(PhantomData<T>);
+struct HealthCheckServiceProvider<T>(PhantomData<T>);
 
-impl<T> Plugin for HealthCheckProvider<T>
+impl<T> Plugin for HealthCheckServiceProvider<T>
 where
     T: Service<Handle = Arc<T>> + HealthCheck + 'static,
 {
@@ -76,37 +75,58 @@ where
     fn dependencies(&self) -> Dependencies {
         T::dependencies()
             .service::<T>()
-            .plugin::<ServiceServerPlugin>()
+            .plugin::<ControlServerPlugin>()
     }
 }
 
 pub trait AddHealthCheckExt {
-    fn add_health_check<T>(&mut self) -> &mut Self
+    fn add_health_check<T>(&mut self, health_check: impl Into<Arc<T>>) -> &mut Self
+    where
+        T: HealthCheck + 'static;
+}
+
+impl AddHealthCheckExt for AppBuilder {
+    fn add_health_check<T>(&mut self, health_check: impl Into<Arc<T>>) -> &mut Self
+    where
+        T: HealthCheck + 'static,
+    {
+        if !self.has_component::<HealthCheckRegistry>() {
+            self.add_component(HealthCheckRegistry::default());
+        }
+        self.get_component_mut::<HealthCheckRegistry>()
+            .unwrap()
+            .add_health_check(health_check.into());
+        self
+    }
+}
+
+pub trait AddHealthCheckServiceExt {
+    fn add_health_check_service<T>(&mut self) -> &mut Self
     where
         T: Service<Handle = Arc<T>> + HealthCheck + 'static;
 
-    fn has_health_check<T>(&self) -> bool
+    fn has_health_check_service<T>(&self) -> bool
     where
         T: Service<Handle = Arc<T>> + HealthCheck + 'static;
 }
 
-impl AddHealthCheckExt for AppBuilder {
-    fn add_health_check<T>(&mut self) -> &mut Self
+impl AddHealthCheckServiceExt for AppBuilder {
+    fn add_health_check_service<T>(&mut self) -> &mut Self
     where
         T: Service<Handle = Arc<T>> + HealthCheck + 'static,
     {
         if !self.has_service::<T>() {
             self.add_service::<T>();
         }
-        self.add_plugin(HealthCheckProvider::<T>(PhantomData));
+        self.add_plugin(HealthCheckServiceProvider::<T>(PhantomData));
         self
     }
 
-    fn has_health_check<T>(&self) -> bool
+    fn has_health_check_service<T>(&self) -> bool
     where
         T: Service<Handle = Arc<T>> + HealthCheck + 'static,
     {
-        self.has_plugin::<HealthCheckProvider<T>>()
+        self.has_plugin::<HealthCheckServiceProvider<T>>()
     }
 }
 

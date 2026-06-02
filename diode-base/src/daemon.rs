@@ -1,9 +1,11 @@
-use std::any::TypeId;
-use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use diode::{App, AppContext, StdError};
+use diode::{
+    AddServiceExt as _, App, AppBuilder, AppContext, Dependencies, Plugin, Service,
+    ServiceDependencyExt as _, StdError,
+};
 use tokio::task::JoinSet;
 
 pub use tokio_util::sync::CancellationToken;
@@ -12,7 +14,7 @@ use crate::defer;
 
 #[derive(Default)]
 struct DaemonRegistry {
-    daemons: HashMap<TypeId, Arc<dyn DynDaemon>>,
+    daemons: Vec<Arc<dyn DynDaemon>>,
 }
 
 impl DaemonRegistry {
@@ -20,16 +22,7 @@ impl DaemonRegistry {
     where
         T: Daemon + 'static,
     {
-        let type_id = TypeId::of::<T>();
-        self.daemons.insert(type_id, daemon);
-    }
-
-    pub fn has_daemon<T>(&self) -> bool
-    where
-        T: Daemon + 'static,
-    {
-        let type_id = TypeId::of::<T>();
-        self.daemons.contains_key(&type_id)
+        self.daemons.push(daemon);
     }
 
     pub async fn run_daemons(
@@ -40,7 +33,7 @@ impl DaemonRegistry {
         let span = tracing::info_span!("daemons");
         let mut futures = JoinSet::new();
         tracing::info!(parent: &span, "Daemons starting");
-        for daemon in self.daemons.values() {
+        for daemon in self.daemons.iter() {
             let shutdown = shutdown.child_token();
             let app = app.clone();
             let daemon = daemon.clone();
@@ -117,10 +110,6 @@ pub trait AddDaemonExt {
     fn add_daemon<T>(&self, daemon: impl Into<Arc<T>>)
     where
         T: Daemon + 'static;
-
-    fn has_daemon<T>(&self) -> bool
-    where
-        T: Daemon + 'static;
 }
 
 impl AddDaemonExt for AppContext {
@@ -135,12 +124,51 @@ impl AddDaemonExt for AppContext {
             .unwrap()
             .add_daemon(daemon.into());
     }
+}
 
-    fn has_daemon<T>(&self) -> bool
+struct DaemonServiceProvider<T>(PhantomData<T>);
+
+impl<T> Plugin for DaemonServiceProvider<T>
+where
+    T: Service<Handle = Arc<T>> + Daemon + 'static,
+{
+    async fn build(&self, ctx: &AppContext) -> Result<(), StdError> {
+        let handle = ctx.get_component::<T::Handle>().unwrap();
+        ctx.add_daemon::<T>(handle);
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Dependencies {
+        T::dependencies().service::<T>()
+    }
+}
+
+pub trait AddDaemonServiceExt {
+    fn add_daemon_service<T>(&mut self) -> &mut Self
     where
-        T: Daemon + 'static,
+        T: Service<Handle = Arc<T>> + Daemon + 'static;
+
+    fn has_daemon_service<T>(&self) -> bool
+    where
+        T: Service<Handle = Arc<T>> + Daemon + 'static;
+}
+
+impl AddDaemonServiceExt for AppBuilder {
+    fn add_daemon_service<T>(&mut self) -> &mut Self
+    where
+        T: Service<Handle = Arc<T>> + Daemon + 'static,
     {
-        self.get_component_ref::<DaemonRegistry>()
-            .is_some_and(|v| v.has_daemon::<T>())
+        if !self.has_service::<T>() {
+            self.add_service::<T>();
+        }
+        self.add_plugin(DaemonServiceProvider::<T>(PhantomData));
+        self
+    }
+
+    fn has_daemon_service<T>(&self) -> bool
+    where
+        T: Service<Handle = Arc<T>> + Daemon + 'static,
+    {
+        self.has_plugin::<DaemonServiceProvider<T>>()
     }
 }
