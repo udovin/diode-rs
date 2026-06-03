@@ -88,8 +88,9 @@ mod defer;
 mod dynamic_config;
 mod dynamic_config_file;
 mod metrics;
-pub mod test;
 mod tracing;
+
+pub mod testing;
 
 pub use bundle::*;
 pub use command::*;

@@ -1,3 +1,5 @@
+use std::any::{TypeId, type_name};
+use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -20,11 +22,19 @@ pub trait RouterBuilder: Send + Sync {
 #[derive(Default)]
 struct RouterRegistry {
     routers: Vec<Arc<dyn RouterBuilder>>,
+    types: HashSet<TypeId>,
 }
 
 impl RouterRegistry {
     fn add_router<T: RouterBuilder + 'static>(&mut self, router: Arc<T>) {
+        if !self.types.insert(TypeId::of::<T>()) {
+            panic!("Router {} already added", type_name::<T>());
+        }
         self.routers.push(router);
+    }
+
+    fn has_router<T: RouterBuilder + 'static>(&self) -> bool {
+        self.types.contains(&TypeId::of::<T>())
     }
 
     fn build_router(&self, app: &App) -> Router {
@@ -104,13 +114,17 @@ where
 }
 
 pub trait AddRouterExt {
-    fn add_router<T>(&mut self, router: impl Into<Arc<T>>) -> &mut Self
+    fn add_router<T>(&self, router: impl Into<Arc<T>>)
+    where
+        T: RouterBuilder + 'static;
+
+    fn has_router<T>(&self) -> bool
     where
         T: RouterBuilder + 'static;
 }
 
-impl AddRouterExt for AppBuilder {
-    fn add_router<T>(&mut self, router: impl Into<Arc<T>>) -> &mut Self
+impl AddRouterExt for AppContext {
+    fn add_router<T>(&self, router: impl Into<Arc<T>>)
     where
         T: RouterBuilder + 'static,
     {
@@ -120,7 +134,14 @@ impl AddRouterExt for AppBuilder {
         self.get_component_mut::<RouterRegistry>()
             .unwrap()
             .add_router(router.into());
-        self
+    }
+
+    fn has_router<T>(&self) -> bool
+    where
+        T: RouterBuilder + 'static,
+    {
+        self.get_component_ref::<RouterRegistry>()
+            .is_some_and(|registry| registry.has_router::<T>())
     }
 }
 

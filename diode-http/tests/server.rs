@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::http::status::StatusCode;
 use axum::response::IntoResponse;
-use diode_base::test::FreePort;
+use diode_base::testing::FreePort;
 use reqwest_middleware::ClientBuilder;
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
 
@@ -259,20 +259,19 @@ impl RouterBuilder for GreetRouter {
 async fn test_router_instance() {
     let server_port = FreePort::new();
 
-    let app = App::builder()
+    let mut builder = App::builder();
+    builder
         .add_plugin(HttpServerPlugin)
-        .add_router(GreetRouter {
-            greeting: "hi there".to_string(),
-        })
         .add_component(Config::new().with(
             "http_server",
             HttpServerConfig {
                 addr: server_port.as_addr(),
             },
-        ))
-        .build()
-        .await
-        .unwrap();
+        ));
+    builder.add_router(GreetRouter {
+        greeting: "hi there".to_string(),
+    });
+    let app = builder.build().await.unwrap();
 
     let shutdown = CancellationToken::new();
 
@@ -319,22 +318,21 @@ impl HealthCheck for FailingHealthCheck {
 async fn test_unhealthy_instance() {
     let server_port = FreePort::new();
 
-    let app = App::builder()
+    let mut builder = App::builder();
+    builder
         .add_plugin(ControlServerPlugin)
         .add_control_router_service::<HealthRouter>()
-        .add_health_check(FailingHealthCheck {
-            name: "disk".to_string(),
-            message: "disk full".to_string(),
-        })
         .add_component(Config::new().with(
             "control_server",
             ControlServerConfig {
                 addr: server_port.as_addr(),
             },
-        ))
-        .build()
-        .await
-        .unwrap();
+        ));
+    builder.add_health_check(FailingHealthCheck {
+        name: "disk".to_string(),
+        message: "disk full".to_string(),
+    });
+    let app = builder.build().await.unwrap();
 
     let shutdown = CancellationToken::new();
 
@@ -404,7 +402,127 @@ async fn test_health_client() {
 
     // HealthClient targets the same running server and should report healthy.
     let result = health_client.health_check().await;
-    assert!(result.is_ok(), "HealthClient::health_check failed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "HealthClient::health_check failed: {result:?}"
+    );
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), server_task).await;
+}
+
+#[test]
+fn test_router_unique_by_type() {
+    let builder = App::builder();
+    assert!(!builder.has_router::<GreetRouter>());
+    builder.add_router(GreetRouter {
+        greeting: "hi".to_string(),
+    });
+    assert!(builder.has_router::<GreetRouter>());
+}
+
+#[test]
+#[should_panic(expected = "already added")]
+fn test_duplicate_router_panics() {
+    let app = App::builder();
+    app.add_router(GreetRouter {
+        greeting: "a".to_string(),
+    });
+    app.add_router(GreetRouter {
+        greeting: "b".to_string(),
+    });
+}
+
+macro_rules! order_middleware {
+    ($name:ident, $tag:literal) => {
+        #[derive(Service)]
+        struct $name;
+
+        impl MiddlewareService for $name {
+            type Error = Infallible;
+
+            async fn call(
+                &self,
+                request: Request,
+                next: impl Next,
+            ) -> Result<Response, Infallible> {
+                let mut response = next.call(request).await;
+                response
+                    .headers_mut()
+                    .append("X-Order", $tag.parse().unwrap());
+                Ok(response)
+            }
+        }
+    };
+}
+
+order_middleware!(MwA, "A");
+order_middleware!(MwB, "B");
+order_middleware!(MwC, "C");
+order_middleware!(MwD, "D");
+
+#[derive(Service)]
+struct OrderRouter;
+
+#[router(middleware = [MwA, MwB])]
+impl OrderRouter {
+    #[route(get, path = "/order", middleware = [MwC, MwD])]
+    async fn order(&self) -> String {
+        "ok".to_string()
+    }
+}
+
+#[tokio::test]
+async fn test_middleware_order() {
+    let server_port = FreePort::new();
+
+    let mut builder = App::builder();
+    builder
+        .add_plugin(HttpServerPlugin)
+        .add_router_service::<OrderRouter>()
+        .add_middleware::<MwA>()
+        .add_middleware::<MwB>()
+        .add_middleware::<MwC>()
+        .add_middleware::<MwD>()
+        .add_component(Config::new().with(
+            "http_server",
+            HttpServerConfig {
+                addr: server_port.as_addr(),
+            },
+        ));
+    let app = builder.build().await.unwrap();
+
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+    let server_task = tokio::spawn(async move { app.run_daemons(shutdown_clone).await });
+
+    let retry_policy = ExponentialBackoff::builder().build_with_max_retries(5);
+    let client = ClientBuilder::new(reqwest::Client::new())
+        .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+        .build();
+    let base_url = format!("http://{}", server_port.as_addr());
+
+    let response = client
+        .get(&format!("{}/order", base_url))
+        .send()
+        .await
+        .expect("Failed to send request");
+    assert_eq!(response.status(), 200);
+
+    // Each middleware appends its tag AFTER calling `next`, so this header lists
+    // them in response order = innermost first.
+    //
+    // Declaration order is now execution order: router-level `[MwA, MwB]` wraps
+    // route-level `[MwC, MwD]`, first entry outermost. Nesting (outer -> inner)
+    // is MwA -> MwB -> MwC -> MwD -> handler, so the request hits them A, B, C, D
+    // and the response unwinds D, C, B, A.
+    let order: Vec<String> = response
+        .headers()
+        .get_all("x-order")
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    assert_eq!(order, ["D", "C", "B", "A"]);
 
     shutdown.cancel();
     let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), server_task).await;

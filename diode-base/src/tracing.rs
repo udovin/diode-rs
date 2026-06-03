@@ -30,6 +30,9 @@ pub struct Tracing {
 impl Tracing {
     pub fn build(ctx: &AppContext) -> Result<(), StdError> {
         if ctx.has_component::<Self>() {
+            if !ctx.has_daemon::<TracingDaemon>() {
+                ctx.add_daemon(TracingDaemon);
+            }
             return Ok(());
         }
         let config = match ctx
@@ -87,7 +90,9 @@ impl Tracing {
             reload_handle,
             tracer_provider,
         });
-        ctx.add_daemon(TracingDaemon);
+        if !ctx.has_daemon::<TracingDaemon>() {
+            ctx.add_daemon(TracingDaemon);
+        }
         Ok(())
     }
 }
@@ -208,6 +213,7 @@ where
         for span in batch.iter_mut() {
             let mut otel_name = None;
             let mut otel_kind = None;
+            #[allow(clippy::needless_bool)]
             span.attributes.retain(|v| {
                 if v.key == OTEL_NAME_KEY {
                     otel_name = Some(v.value.clone());

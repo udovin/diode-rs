@@ -6,6 +6,8 @@ use diode::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    any::{TypeId, type_name},
+    collections::HashSet,
     marker::PhantomData,
     sync::Arc,
     time::{Duration, Instant},
@@ -16,6 +18,7 @@ use crate::{ControlServerPlugin, RouterBuilder};
 #[derive(Default)]
 pub(crate) struct HealthCheckRegistry {
     health_checks: Vec<Arc<dyn DynHealthCheck>>,
+    types: HashSet<TypeId>,
 }
 
 impl HealthCheckRegistry {
@@ -23,7 +26,17 @@ impl HealthCheckRegistry {
     where
         T: HealthCheck + 'static,
     {
+        if !self.types.insert(TypeId::of::<T>()) {
+            panic!("Health check {} already added", type_name::<T>());
+        }
         self.health_checks.push(health_check);
+    }
+
+    pub fn has_health_check<T>(&self) -> bool
+    where
+        T: HealthCheck + 'static,
+    {
+        self.types.contains(&TypeId::of::<T>())
     }
 
     pub fn build_health_checks(&self) -> Arc<[Arc<dyn DynHealthCheck>]> {
@@ -80,13 +93,17 @@ where
 }
 
 pub trait AddHealthCheckExt {
-    fn add_health_check<T>(&mut self, health_check: impl Into<Arc<T>>) -> &mut Self
+    fn add_health_check<T>(&self, health_check: impl Into<Arc<T>>)
+    where
+        T: HealthCheck + 'static;
+
+    fn has_health_check<T>(&self) -> bool
     where
         T: HealthCheck + 'static;
 }
 
-impl AddHealthCheckExt for AppBuilder {
-    fn add_health_check<T>(&mut self, health_check: impl Into<Arc<T>>) -> &mut Self
+impl AddHealthCheckExt for AppContext {
+    fn add_health_check<T>(&self, health_check: impl Into<Arc<T>>)
     where
         T: HealthCheck + 'static,
     {
@@ -96,7 +113,14 @@ impl AddHealthCheckExt for AppBuilder {
         self.get_component_mut::<HealthCheckRegistry>()
             .unwrap()
             .add_health_check(health_check.into());
-        self
+    }
+
+    fn has_health_check<T>(&self) -> bool
+    where
+        T: HealthCheck + 'static,
+    {
+        self.get_component_ref::<HealthCheckRegistry>()
+            .is_some_and(|registry| registry.has_health_check::<T>())
     }
 }
 

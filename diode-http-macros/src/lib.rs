@@ -177,6 +177,10 @@ fn handle_router_impl(input: ItemImpl, router_attr: RouterAttribute) -> TokenStr
 
     let router_middleware = router_attr.middleware;
 
+    // Reverse so that the first middleware in the list ends up outermost: each
+    // `.layer()` wraps the previous one, so the last applied layer runs first.
+    let router_middleware: Vec<_> = router_middleware.into_iter().rev().collect();
+
     // Create cleaned impl with route attributes removed
     let mut cleaned_input = input.clone();
     for item in &mut cleaned_input.items {
@@ -201,6 +205,9 @@ fn handle_router_impl(input: ItemImpl, router_attr: RouterAttribute) -> TokenStr
                     path,
                     middleware,
                 }) => {
+                    // Reverse so the first middleware in the list ends up outermost
+                    // (see the router-level note above).
+                    let middleware: Vec<_> = middleware.into_iter().rev().collect();
                     let ident = &fn_item.sig.ident;
                     let arg_count = fn_item.sig.inputs.len().saturating_sub(1); // Exclude self
                     let args: Vec<_> = (0..arg_count)

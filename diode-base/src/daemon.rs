@@ -1,3 +1,5 @@
+use std::any::{TypeId, type_name};
+use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -15,6 +17,7 @@ use crate::defer;
 #[derive(Default)]
 struct DaemonRegistry {
     daemons: Vec<Arc<dyn DynDaemon>>,
+    types: HashSet<TypeId>,
 }
 
 impl DaemonRegistry {
@@ -22,7 +25,17 @@ impl DaemonRegistry {
     where
         T: Daemon + 'static,
     {
+        if !self.types.insert(TypeId::of::<T>()) {
+            panic!("Daemon {} already added", type_name::<T>());
+        }
         self.daemons.push(daemon);
+    }
+
+    pub fn has_daemon<T>(&self) -> bool
+    where
+        T: Daemon + 'static,
+    {
+        self.types.contains(&TypeId::of::<T>())
     }
 
     pub async fn run_daemons(
@@ -110,6 +123,10 @@ pub trait AddDaemonExt {
     fn add_daemon<T>(&self, daemon: impl Into<Arc<T>>)
     where
         T: Daemon + 'static;
+
+    fn has_daemon<T>(&self) -> bool
+    where
+        T: Daemon + 'static;
 }
 
 impl AddDaemonExt for AppContext {
@@ -123,6 +140,14 @@ impl AddDaemonExt for AppContext {
         self.get_component_mut::<DaemonRegistry>()
             .unwrap()
             .add_daemon(daemon.into());
+    }
+
+    fn has_daemon<T>(&self) -> bool
+    where
+        T: Daemon + 'static,
+    {
+        self.get_component_ref::<DaemonRegistry>()
+            .is_some_and(|registry| registry.has_daemon::<T>())
     }
 }
 
