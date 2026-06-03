@@ -15,7 +15,17 @@ use tokio::net::TcpListener;
 
 use crate::tracing::TracingLayer;
 
+/// Builds the [`axum::Router`] contributed by a type to an HTTP server.
+///
+/// Implement this for any value that exposes routes. The builder is handed the
+/// fully built [`App`], so it can resolve other components (services,
+/// registries, configuration) while assembling its routes.
+///
+/// Register an implementor with [`AddRouterExt::add_router`] (a concrete
+/// instance) or [`AddRouterServiceExt::add_router_service`] (resolved from a
+/// [`Service`]). The server merges every registered router into one.
 pub trait RouterBuilder: Send + Sync {
+    /// Builds this type's routes into a [`Router`].
     fn build_router(self: Arc<Self>, app: &App) -> Router;
 }
 
@@ -70,12 +80,21 @@ impl Daemon for ServerDaemon {
     }
 }
 
+/// Configuration for the public HTTP server, read from the `http_server`
+/// config section.
 #[derive(Serialize, Deserialize)]
 #[config_section("http_server")]
 pub struct HttpServerConfig {
+    /// Socket address the server binds and listens on.
     pub addr: SocketAddr,
 }
 
+/// Plugin that runs the public HTTP server.
+///
+/// Add it to the [`AppBuilder`] to serve every router registered through
+/// [`AddRouterExt`] / [`AddRouterServiceExt`]. The server binds the address from
+/// [`HttpServerConfig`] (config section `http_server`) and runs as a [`Daemon`],
+/// shutting down gracefully when its cancellation token fires.
 pub struct HttpServerPlugin;
 
 impl Plugin for HttpServerPlugin {
@@ -113,11 +132,32 @@ where
     }
 }
 
+/// Registers concrete [`RouterBuilder`] instances on the public HTTP server.
+///
+/// This extension lives on [`AppContext`], so routers can be registered both
+/// while configuring the [`AppBuilder`] and from within a plugin's `build`. A
+/// router is identified by its type: at most one instance of a given type may be
+/// registered.
+///
+/// Registration does not require [`HttpServerPlugin`]; if the plugin is never
+/// added the router is simply never served.
 pub trait AddRouterExt {
+    /// Registers `router` on the public HTTP server.
+    ///
+    /// The router is stored under its concrete type `T`. To expose several
+    /// distinct sets of routes use distinct types; a single type that needs many
+    /// routes should build them all in its [`RouterBuilder`] implementation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a router of type `T` is already registered on this server.
+    /// Guard with [`has_router`](AddRouterExt::has_router) when the same type may
+    /// be registered more than once (for example from several bundles).
     fn add_router<T>(&self, router: impl Into<Arc<T>>)
     where
         T: RouterBuilder + 'static;
 
+    /// Returns whether a router of type `T` is registered on the public server.
     fn has_router<T>(&self) -> bool
     where
         T: RouterBuilder + 'static;
@@ -145,11 +185,30 @@ impl AddRouterExt for AppContext {
     }
 }
 
+/// Registers routers resolved from the dependency-injection container on the
+/// public HTTP server.
+///
+/// Unlike [`AddRouterExt`], the router type `T` is a [`Service`]: it is built by
+/// the container (together with its dependencies) and its handle is then
+/// registered as a [`RouterBuilder`]. The service is added automatically if it
+/// is not already present.
 pub trait AddRouterServiceExt {
+    /// Registers the [`Service`] `T` and serves its routes on the public server.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `T` is already registered as a router service (its provider
+    /// plugin would be added twice); guard with
+    /// [`has_router_service`](AddRouterServiceExt::has_router_service) when this
+    /// can happen. Building the [`App`] additionally panics if `T` is registered
+    /// both as a service router and as an instance via
+    /// [`AddRouterExt::add_router`], since a type may back at most one router.
     fn add_router_service<T>(&mut self) -> &mut Self
     where
         T: Service<Handle = Arc<T>> + RouterBuilder + 'static;
 
+    /// Returns whether `T` is registered as a router service on the public
+    /// server.
     fn has_router_service<T>(&self) -> bool
     where
         T: Service<Handle = Arc<T>> + RouterBuilder + 'static;

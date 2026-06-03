@@ -67,12 +67,24 @@ impl Daemon for ControlServerDaemon {
     }
 }
 
+/// Configuration for the control HTTP server, read from the `control_server`
+/// config section.
 #[derive(Serialize, Deserialize)]
 #[config_section("control_server")]
 pub struct ControlServerConfig {
+    /// Socket address the control server binds and listens on.
     pub addr: SocketAddr,
 }
 
+/// Plugin that runs the control HTTP server.
+///
+/// The control server is a separate, typically internal, server intended for
+/// operational endpoints (health, readiness, and so on). It serves the routers
+/// registered through [`AddControlRouterExt`] / [`AddControlRouterServiceExt`],
+/// hosts the health-check registry used by [`HealthRouter`](crate::HealthRouter),
+/// and exposes a [`HealthClient`] component pointed at its own `/health`
+/// endpoint. It binds the address from [`ControlServerConfig`] (config section
+/// `control_server`).
 pub struct ControlServerPlugin;
 
 impl Plugin for ControlServerPlugin {
@@ -114,11 +126,27 @@ where
     }
 }
 
+/// Registers concrete [`RouterBuilder`] instances on the control HTTP server.
+///
+/// The control-server counterpart of [`AddRouterExt`](crate::AddRouterExt).
+/// Lives on [`AppContext`], so routers can be registered while configuring the
+/// [`AppBuilder`] or from within a plugin's `build`. A router is identified by
+/// its type. Registration does not require [`ControlServerPlugin`]; without it
+/// the router is simply never served.
 pub trait AddControlRouterExt {
+    /// Registers `router` on the control HTTP server.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a router of type `T` is already registered on the control
+    /// server. Guard with
+    /// [`has_control_router`](AddControlRouterExt::has_control_router) when the
+    /// same type may be registered more than once.
     fn add_control_router<T>(&self, router: impl Into<Arc<T>>)
     where
         T: RouterBuilder + 'static;
 
+    /// Returns whether a router of type `T` is registered on the control server.
     fn has_control_router<T>(&self) -> bool
     where
         T: RouterBuilder + 'static;
@@ -146,12 +174,27 @@ impl AddControlRouterExt for AppContext {
     }
 }
 
+/// Registers routers resolved from the dependency-injection container on the
+/// control HTTP server.
+///
+/// The control-server counterpart of
+/// [`AddRouterServiceExt`](crate::AddRouterServiceExt): the router type `T` is a
+/// [`Service`], built by the container and registered as a [`RouterBuilder`].
+/// The service is added automatically if it is not already present.
 pub trait AddControlRouterServiceExt {
-    /// Registers a router resolved from a DI [`Service`] on the control server.
+    /// Registers the [`Service`] `T` and serves its routes on the control
+    /// server.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `T` is already registered as a control router service. Building
+    /// the [`App`] additionally panics if `T` is registered both as a service
+    /// router and as an instance via [`AddControlRouterExt::add_control_router`].
     fn add_control_router_service<T>(&mut self) -> &mut Self
     where
         T: Service<Handle = Arc<T>> + RouterBuilder + 'static;
 
+    /// Returns whether `T` is registered as a control router service.
     fn has_control_router_service<T>(&self) -> bool
     where
         T: Service<Handle = Arc<T>> + RouterBuilder + 'static;

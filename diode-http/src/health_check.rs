@@ -44,9 +44,20 @@ impl HealthCheckRegistry {
     }
 }
 
+/// A named check reporting whether a part of the application is healthy.
+///
+/// Implementors are aggregated by the control server's [`HealthRouter`]: a
+/// `GET /health` runs every registered check in registration order and fails on
+/// the first error, reporting that check's [`name`](HealthCheck::name).
+///
+/// Register a check with [`AddHealthCheckExt::add_health_check`] (a concrete
+/// instance) or [`AddHealthCheckServiceExt::add_health_check_service`] (resolved
+/// from a [`Service`]).
 pub trait HealthCheck: Send + Sync {
+    /// Name reported when this check fails.
     fn name(&self) -> &str;
 
+    /// Performs the check, returning `Err` if the dependency is unhealthy.
     fn health_check(&self) -> impl Future<Output = Result<(), StdError>> + Send;
 }
 
@@ -92,11 +103,26 @@ where
     }
 }
 
+/// Registers concrete [`HealthCheck`] instances on the control server.
+///
+/// Lives on [`AppContext`], so checks can be registered while configuring the
+/// [`AppBuilder`] or from within a plugin's `build`. A check is identified by its
+/// type and is only ever run if [`ControlServerPlugin`] is added (it provides the
+/// registry and the [`HealthRouter`] that drives the checks).
 pub trait AddHealthCheckExt {
+    /// Registers `health_check` on the control server.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a health check of type `T` is already registered. Guard with
+    /// [`has_health_check`](AddHealthCheckExt::has_health_check) when the same
+    /// type may be registered more than once; to run several checks of the same
+    /// kind, make the type itself aggregate them.
     fn add_health_check<T>(&self, health_check: impl Into<Arc<T>>)
     where
         T: HealthCheck + 'static;
 
+    /// Returns whether a health check of type `T` is registered.
     fn has_health_check<T>(&self) -> bool
     where
         T: HealthCheck + 'static;
@@ -124,11 +150,23 @@ impl AddHealthCheckExt for AppContext {
     }
 }
 
+/// Registers health checks resolved from the dependency-injection container.
+///
+/// The check type `T` is a [`Service`], built by the container and registered as
+/// a [`HealthCheck`]. The service is added automatically if not already present.
 pub trait AddHealthCheckServiceExt {
+    /// Registers the [`Service`] `T` as a health check on the control server.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `T` is already registered as a health-check service. Building
+    /// the [`App`] additionally panics if `T` is registered both as a service
+    /// and as an instance via [`AddHealthCheckExt::add_health_check`].
     fn add_health_check_service<T>(&mut self) -> &mut Self
     where
         T: Service<Handle = Arc<T>> + HealthCheck + 'static;
 
+    /// Returns whether `T` is registered as a health-check service.
     fn has_health_check_service<T>(&self) -> bool
     where
         T: Service<Handle = Arc<T>> + HealthCheck + 'static;
@@ -154,6 +192,12 @@ impl AddHealthCheckServiceExt for AppBuilder {
     }
 }
 
+/// Client for probing a service's `/health` endpoint over HTTP.
+///
+/// The [`ControlServerPlugin`] registers a `HealthClient` component pointed at
+/// its own health endpoint; it can also be built directly with
+/// [`new`](HealthClient::new) to probe a remote service (for example to wait for
+/// a dependency to become ready).
 #[derive(Clone)]
 pub struct HealthClient {
     client: reqwest::Client,
@@ -161,6 +205,10 @@ pub struct HealthClient {
 }
 
 impl HealthClient {
+    /// Creates a client that probes `endpoint`.
+    ///
+    /// `endpoint` must be the full health URL, for example
+    /// `http://127.0.0.1:8080/health`.
     pub fn new(endpoint: String) -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -168,6 +216,12 @@ impl HealthClient {
         }
     }
 
+    /// Performs a single health probe.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`HealthCheckError`] if the request cannot be sent or the
+    /// endpoint responds with a non-success status.
     pub async fn health_check(&self) -> Result<(), HealthCheckError> {
         let response = self
             .client
@@ -189,6 +243,13 @@ impl HealthClient {
         }
     }
 
+    /// Polls the endpoint until it reports healthy or `timeout` elapses,
+    /// retrying every 100 ms.
+    ///
+    /// # Errors
+    ///
+    /// Returns the last [`HealthCheckError`] if the endpoint is still not healthy
+    /// when `timeout` elapses.
     pub async fn wait_for_ready(&self, timeout: Duration) -> Result<(), HealthCheckError> {
         let start = Instant::now();
         loop {
@@ -205,6 +266,13 @@ impl HealthClient {
     }
 }
 
+/// Router exposing `GET /health` on the control server.
+///
+/// Aggregates every registered [`HealthCheck`]: the endpoint returns `200` with
+/// body `healthy` when all checks pass, or `500` with a JSON [`HealthCheckError`]
+/// naming the first check that failed. Register it with
+/// [`add_control_router_service`](crate::AddControlRouterServiceExt::add_control_router_service);
+/// it relies on [`ControlServerPlugin`] for the health-check registry.
 #[derive(Service)]
 pub struct HealthRouter;
 
@@ -241,6 +309,10 @@ impl HealthRouter {
     }
 }
 
+/// Error reported by a failed health check: the failing check's name and a
+/// message.
+///
+/// Serializes to JSON and renders as an HTTP `500` response.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HealthCheckError {
     name: String,
@@ -257,6 +329,9 @@ impl axum::response::IntoResponse for HealthCheckError {
     }
 }
 
+/// Router exposing `GET /ping`, which always returns `pong`.
+///
+/// A trivial liveness endpoint; register it as a router on either server.
 #[derive(Service)]
 pub struct PingHandler;
 
