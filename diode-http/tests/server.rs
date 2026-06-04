@@ -11,10 +11,10 @@ use diode::{App, Service};
 use diode_base::{CancellationToken, Config, RunDaemonsExt as _};
 use diode_http::{
     AddControlRouterServiceExt as _, AddHealthCheckExt, AddHealthCheckServiceExt as _,
-    AddMiddlewareExt, AddRouterExt, AddRouterServiceExt as _, ControlServerConfig,
-    ControlServerPlugin, HealthCheck, HealthClient, HealthRouter, HttpServerConfig,
-    HttpServerPlugin, MiddlewareService, Next, Request, Response, Router, RouterBuilder, router,
-    routing,
+    AddMiddlewareExt, AddMiddlewareServiceExt as _, AddRouterExt, AddRouterServiceExt as _,
+    ControlServerConfig, ControlServerPlugin, HealthCheck, HealthClient, HealthRouter,
+    HttpServerConfig, HttpServerPlugin, Middleware, Next, Request, Response, Router,
+    RouterBuilder, router, routing,
 };
 
 #[derive(Service)]
@@ -36,7 +36,7 @@ impl ExampleRouter {
 #[derive(Service)]
 pub struct AuthMiddleware;
 
-impl MiddlewareService for AuthMiddleware {
+impl Middleware for AuthMiddleware {
     type Error = Infallible;
 
     async fn call(&self, request: Request, next: impl Next) -> Result<Response, Infallible> {
@@ -58,7 +58,7 @@ impl MiddlewareService for AuthMiddleware {
 #[derive(Service)]
 pub struct ReqIdMiddleware;
 
-impl MiddlewareService for ReqIdMiddleware {
+impl Middleware for ReqIdMiddleware {
     type Error = Infallible;
 
     async fn call(&self, request: Request, next: impl Next) -> Result<Response, Infallible> {
@@ -77,8 +77,8 @@ async fn test_example_router_and_middleware() {
     let app = App::builder()
         .add_plugin(HttpServerPlugin)
         .add_router_service::<ExampleRouter>()
-        .add_middleware::<AuthMiddleware>()
-        .add_middleware::<ReqIdMiddleware>()
+        .add_middleware_service::<AuthMiddleware>()
+        .add_middleware_service::<ReqIdMiddleware>()
         .add_component(Config::new().with(
             "http_server",
             HttpServerConfig {
@@ -438,7 +438,7 @@ macro_rules! order_middleware {
         #[derive(Service)]
         struct $name;
 
-        impl MiddlewareService for $name {
+        impl Middleware for $name {
             type Error = Infallible;
 
             async fn call(
@@ -480,10 +480,10 @@ async fn test_middleware_order() {
     builder
         .add_plugin(HttpServerPlugin)
         .add_router_service::<OrderRouter>()
-        .add_middleware::<MwA>()
-        .add_middleware::<MwB>()
-        .add_middleware::<MwC>()
-        .add_middleware::<MwD>()
+        .add_middleware_service::<MwA>()
+        .add_middleware_service::<MwB>()
+        .add_middleware_service::<MwC>()
+        .add_middleware_service::<MwD>()
         .add_component(Config::new().with(
             "http_server",
             HttpServerConfig {
@@ -523,6 +523,84 @@ async fn test_middleware_order() {
         .map(|v| v.to_str().unwrap().to_string())
         .collect();
     assert_eq!(order, ["D", "C", "B", "A"]);
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), server_task).await;
+}
+
+// A stateful middleware that is NOT a `Service` - it is registered as a concrete
+// instance, exercising the instance form of `add_middleware`.
+struct ValueHeaderMiddleware {
+    value: String,
+}
+
+impl Middleware for ValueHeaderMiddleware {
+    type Error = Infallible;
+
+    async fn call(&self, request: Request, next: impl Next) -> Result<Response, Infallible> {
+        let mut response = next.call(request).await;
+        response
+            .headers_mut()
+            .append("X-Custom", self.value.parse().unwrap());
+        Ok(response)
+    }
+}
+
+#[derive(Service)]
+struct InstanceMwRouter;
+
+#[router(middleware = [ValueHeaderMiddleware])]
+impl InstanceMwRouter {
+    #[route(get, path = "/instance")]
+    async fn handler(&self) -> String {
+        "ok".to_string()
+    }
+}
+
+#[tokio::test]
+async fn test_middleware_instance() {
+    let server_port = FreePort::new();
+
+    let mut builder = App::builder();
+    builder
+        .add_plugin(HttpServerPlugin)
+        .add_router_service::<InstanceMwRouter>()
+        .add_component(Config::new().with(
+            "http_server",
+            HttpServerConfig {
+                addr: server_port.as_addr(),
+            },
+        ));
+    builder.add_middleware(ValueHeaderMiddleware {
+        value: "from-instance".to_string(),
+    });
+    let app = builder.build().await.unwrap();
+
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+    let server_task = tokio::spawn(async move { app.run_daemons(shutdown_clone).await });
+
+    let retry_policy = ExponentialBackoff::builder().build_with_max_retries(5);
+    let client = ClientBuilder::new(reqwest::Client::new())
+        .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+        .build();
+    let base_url = format!("http://{}", server_port.as_addr());
+
+    let response = client
+        .get(&format!("{}/instance", base_url))
+        .send()
+        .await
+        .expect("Failed to send request");
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response
+            .headers()
+            .get("X-Custom")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "from-instance"
+    );
 
     shutdown.cancel();
     let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), server_task).await;

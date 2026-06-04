@@ -79,9 +79,10 @@ check first.
 
 ## Middleware
 
-Middleware implements `MiddlewareService` (a `Service`, so it can hold injected
-dependencies). Register it with `add_middleware::<T>()` and attach it with the
-macro attributes:
+Middleware implements the `Middleware` trait. Register a concrete instance with
+`add_middleware(value)`, or a DI-built middleware (one that holds injected
+dependencies) with `add_middleware_service::<T>()`. Attach it with the macro
+attributes:
 
 ```rust,ignore
 #[router(middleware = [RequestId])]

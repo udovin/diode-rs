@@ -1,16 +1,13 @@
 use std::mem::replace;
 use std::pin::Pin;
-use std::{marker::PhantomData, sync::Arc};
+use std::sync::Arc;
 
 use axum::response::Response;
 use axum::{extract::Request, response::IntoResponse};
-use diode::{
-    AddServiceExt as _, AppBuilder, AppContext, Dependencies, Plugin, Service,
-    ServiceDependencyExt as _,
-};
+use diode::{AddServiceExt as _, AppBuilder, AppContext, Service};
 
-/// The continuation passed to a [`MiddlewareService`]: runs the rest of the
-/// chain (the next middleware, or the route handler).
+/// The continuation passed to a [`Middleware`]: runs the rest of the chain (the
+/// next middleware, or the route handler).
 ///
 /// Call [`call`](Next::call) to forward the (possibly modified) request inward
 /// and obtain the response. Not calling it short-circuits the chain: your
@@ -48,7 +45,7 @@ impl<T, S> tower::Layer<S> for MiddlewareLayerImpl<T> {
 
     fn layer(&self, inner: S) -> Self::Service {
         Self::Service {
-            service: self.0.clone(),
+            middleware: self.0.clone(),
             inner,
         }
     }
@@ -56,7 +53,7 @@ impl<T, S> tower::Layer<S> for MiddlewareLayerImpl<T> {
 
 #[doc(hidden)]
 pub struct MiddlewareServiceImpl<T, S> {
-    service: Arc<T>,
+    middleware: Arc<T>,
     inner: S,
 }
 
@@ -66,7 +63,7 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            service: self.service.clone(),
+            middleware: self.middleware.clone(),
             inner: self.inner.clone(),
         }
     }
@@ -74,7 +71,7 @@ where
 
 impl<T, S> tower::Service<Request> for MiddlewareServiceImpl<T, S>
 where
-    T: MiddlewareService + 'static,
+    T: Middleware + 'static,
     S: tower::Service<Request> + Clone + Send + Sync + 'static,
     S::Response: IntoResponse,
     S::Error: IntoResponse,
@@ -96,10 +93,10 @@ where
     fn call(&mut self, request: Request) -> Self::Future {
         let clone = self.inner.clone();
         let inner = replace(&mut self.inner, clone);
-        let layer = self.service.clone();
+        let middleware = self.middleware.clone();
         let next = NextImpl(inner);
         Box::pin(async move {
-            match layer.call(request, next).await {
+            match middleware.call(request, next).await {
                 Ok(response) => Ok(response.into_response()),
                 Err(err) => Ok(err.into_response()),
             }
@@ -113,11 +110,12 @@ where
 /// may inspect or modify the request, short-circuit with its own response, or
 /// call `next` and then inspect or modify the response.
 ///
-/// Middleware is a [`Service`], so it is built by the container and may hold
-/// injected dependencies. Attach it to routes with the
-/// `#[router(middleware = [..])]` / `#[route(middleware = [..])]` macro
-/// attributes, and register the service with
-/// [`AddMiddlewareExt::add_middleware`].
+/// Register it as a concrete instance with [`AddMiddlewareExt::add_middleware`],
+/// or resolved from the DI container with
+/// [`AddMiddlewareServiceExt::add_middleware_service`] (the latter additionally
+/// requires the type to be a [`Service`], so it can hold injected dependencies).
+/// Attach it to routes with the `#[router(middleware = [..])]` /
+/// `#[route(middleware = [..])]` macro attributes.
 ///
 /// # Ordering
 ///
@@ -126,9 +124,9 @@ where
 /// route-level middleware. So `#[router(middleware = [A, B])]` combined with
 /// `#[route(middleware = [C, D])]` enters as `A, B, C, D` and unwinds as
 /// `D, C, B, A`.
-pub trait MiddlewareService: Service<Handle = Arc<Self>> {
-    /// Error type rendered into a response when
-    /// [`call`](MiddlewareService::call) returns `Err`.
+pub trait Middleware: Send + Sync {
+    /// Error type rendered into a response when [`call`](Middleware::call)
+    /// returns `Err`.
     type Error: IntoResponse;
 
     /// Handles `request`, optionally delegating to `next`.
@@ -139,81 +137,86 @@ pub trait MiddlewareService: Service<Handle = Arc<Self>> {
     ) -> impl Future<Output = Result<Response, Self::Error>> + Send;
 }
 
-struct MiddlewareProvider<T>(PhantomData<T>)
-where
-    T: MiddlewareService;
-
-impl<T> Plugin for MiddlewareProvider<T>
-where
-    T: MiddlewareService + 'static,
-{
-    async fn build(&self, _ctx: &AppContext) -> Result<(), diode::StdError> {
-        Ok(())
-    }
-
-    fn dependencies(&self) -> diode::Dependencies {
-        Dependencies::new().service::<T>()
-    }
-}
-
-/// Registers [`MiddlewareService`] implementations so the router macros can
-/// resolve them.
+/// Registers concrete [`Middleware`] instances so the router macros can resolve
+/// them.
 ///
-/// A middleware must be registered here for any router that references it via
-/// `#[router(middleware = [..])]` / `#[route(middleware = [..])]`; the generated
-/// [`RouterBuilder`](crate::RouterBuilder) looks up the middleware's handle while
-/// it builds.
+/// Lives on [`AppContext`], so middleware can be registered while configuring the
+/// [`AppBuilder`] or from within a plugin's `build`. A middleware is identified by
+/// its type and stored as an `Arc<T>` component; reference it from a router with
+/// the `#[router(middleware = [..])]` / `#[route(middleware = [..])]` attributes.
 pub trait AddMiddlewareExt {
-    /// Registers the middleware service `T`.
+    /// Registers `middleware` so routers can reference it by type `T`.
     ///
     /// # Panics
     ///
-    /// Panics if `T` is already registered as middleware. Guard with
+    /// Panics if a middleware of type `T` is already registered (as an instance,
+    /// or - once the app is built - as a service). Guard with
     /// [`has_middleware`](AddMiddlewareExt::has_middleware) when this can happen.
-    fn add_middleware<T>(&mut self) -> &mut Self
+    fn add_middleware<T>(&self, middleware: impl Into<Arc<T>>)
     where
-        T: MiddlewareService + 'static;
+        T: Middleware + 'static;
 
-    /// Returns whether `T` is registered as middleware.
+    /// Returns whether a middleware of type `T` is registered (its `Arc<T>` is
+    /// present as a component).
     fn has_middleware<T>(&self) -> bool
     where
-        T: MiddlewareService + 'static;
+        T: Middleware + 'static;
 }
 
-impl AddMiddlewareExt for AppBuilder {
-    fn add_middleware<T>(&mut self) -> &mut Self
+impl AddMiddlewareExt for AppContext {
+    fn add_middleware<T>(&self, middleware: impl Into<Arc<T>>)
     where
-        T: MiddlewareService + 'static,
+        T: Middleware + 'static,
+    {
+        self.add_component::<Arc<T>>(middleware.into());
+    }
+
+    fn has_middleware<T>(&self) -> bool
+    where
+        T: Middleware + 'static,
+    {
+        self.has_component::<Arc<T>>()
+    }
+}
+
+/// Registers middleware resolved from the dependency-injection container.
+///
+/// The middleware type `T` is a [`Service`]; it is built by the container (with
+/// its dependencies) and its handle - an `Arc<T>` - becomes the component the
+/// router macros resolve. The service is added if it is not already present.
+pub trait AddMiddlewareServiceExt {
+    /// Registers the [`Service`] `T` so it is available as middleware.
+    ///
+    /// # Panics
+    ///
+    /// Building the [`App`](diode::App) panics if `T` is registered both as a
+    /// service and as an instance via [`AddMiddlewareExt::add_middleware`].
+    fn add_middleware_service<T>(&mut self) -> &mut Self
+    where
+        T: Middleware + Service<Handle = Arc<T>> + 'static;
+
+    /// Returns whether `T` is registered as a service (and therefore available
+    /// as middleware).
+    fn has_middleware_service<T>(&self) -> bool
+    where
+        T: Middleware + Service<Handle = Arc<T>> + 'static;
+}
+
+impl AddMiddlewareServiceExt for AppBuilder {
+    fn add_middleware_service<T>(&mut self) -> &mut Self
+    where
+        T: Middleware + Service<Handle = Arc<T>> + 'static,
     {
         if !self.has_service::<T>() {
             self.add_service::<T>();
         }
-        self.add_plugin(MiddlewareProvider::<T>(PhantomData));
         self
     }
 
-    fn has_middleware<T>(&self) -> bool
+    fn has_middleware_service<T>(&self) -> bool
     where
-        T: MiddlewareService + 'static,
+        T: Middleware + Service<Handle = Arc<T>> + 'static,
     {
-        self.has_plugin::<MiddlewareProvider<T>>()
-    }
-}
-
-/// Declares a [`MiddlewareService`] as a [`Dependencies`] entry, so the plugin
-/// or service declaring it is built only after the middleware is registered.
-pub trait MiddlewareDependencyExt {
-    /// Adds `T` as a middleware dependency.
-    fn middleware<T>(self) -> Self
-    where
-        T: MiddlewareService + 'static;
-}
-
-impl MiddlewareDependencyExt for Dependencies {
-    fn middleware<T>(self) -> Self
-    where
-        T: MiddlewareService + 'static,
-    {
-        self.plugin::<MiddlewareProvider<T>>()
+        self.has_service::<T>()
     }
 }

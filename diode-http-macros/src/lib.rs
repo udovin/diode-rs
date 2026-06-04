@@ -223,14 +223,13 @@ fn handle_router_impl(input: ItemImpl, router_attr: RouterAttribute) -> TokenStr
                         });
                         #(
                             let middleware = app
-                                .get_component::<<#middleware as ::diode::Service>::Handle>()
-                                .ok_or_else(|| {
-                                    format!(
-                                        "Missing component: {}",
-                                        ::std::any::type_name::<<#middleware as ::diode::Service>::Handle>()
+                                .get_component::<::std::sync::Arc<#middleware>>()
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "Middleware {} is not registered",
+                                        ::std::any::type_name::<#middleware>()
                                     )
-                                })
-                                .unwrap();
+                                });
                             route = route.layer(::diode_http::MiddlewareLayerImpl(middleware));
                         )*
                         router = router.route(#path, route);
@@ -261,14 +260,13 @@ fn handle_router_impl(input: ItemImpl, router_attr: RouterAttribute) -> TokenStr
                 #(#routes)*
                 #(
                     let middleware = app
-                        .get_component::<<#router_middleware as ::diode::Service>::Handle>()
-                        .ok_or_else(|| {
-                            format!(
-                                "Missing component: {}",
-                                ::std::any::type_name::<<#router_middleware as ::diode::Service>::Handle>()
+                        .get_component::<::std::sync::Arc<#router_middleware>>()
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "Middleware {} is not registered",
+                                ::std::any::type_name::<#router_middleware>()
                             )
-                        })
-                        .unwrap();
+                        });
                     router = router.layer(::diode_http::MiddlewareLayerImpl(middleware));
                 )*
                 router
