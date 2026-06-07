@@ -7,6 +7,7 @@ members = [
     "diode-http",
     "diode-http-macros",
     "diode-sql",
+    "diode-sql-macros",
 ]
 resolver = "3"
 
@@ -18,3 +19,4 @@ diode-base-macros = { path = "diode-base-macros", version = "0.1" }
 diode-http = { path = "diode-http", version = "0.4" }
 diode-http-macros = { path = "diode-http-macros", version = "0.3" }
 diode-sql = { path = "diode-sql", version = "0.1" }
+diode-sql-macros = { path = "diode-sql-macros", version = "0.1" }
