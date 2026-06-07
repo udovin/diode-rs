@@ -56,11 +56,18 @@ fn expand_object(input: DeriveInput) -> Result<TokenStream2, Error> {
     let fields_impl = fields_impl(name, &infos);
     let keyed_impl = keyed_impl(name, &infos);
 
+    // Option-typed primary-key columns are assigned by the database when unset.
+    let generated = infos
+        .iter()
+        .filter(|f| f.is_key && option_inner(f.ty).is_some())
+        .map(|f| f.column.as_str());
+
     Ok(quote! {
         #fields_impl
 
         impl ::diode_sql::Object for #name {
             const TABLE_NAME: &'static str = #table_name;
+            const GENERATED_COLUMNS: &'static [&'static str] = &[ #(#generated),* ];
         }
 
         #keyed_impl

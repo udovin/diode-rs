@@ -89,6 +89,11 @@ impl Values {
         self.0.get(index)
     }
 
+    /// Appends a value to the end of the row.
+    pub fn push(&mut self, value: Value) {
+        self.0.push(value);
+    }
+
     /// Sets the value at `index`. Returns whether the index was in bounds.
     pub fn set(&mut self, index: usize, value: Value) -> bool {
         match self.0.get_mut(index) {

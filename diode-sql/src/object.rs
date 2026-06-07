@@ -45,6 +45,12 @@ pub trait Fields: Sized {
 pub trait Object: Fields {
     /// The table name.
     const TABLE_NAME: &'static str;
+
+    /// Columns the database fills in when they are omitted, such as an
+    /// auto-increment primary key. [`insert`](crate::QueryObject::insert) leaves
+    /// them out when their value is null so the database can assign one. Empty by
+    /// default; the derive sets it to the `Option`-typed primary-key columns.
+    const GENERATED_COLUMNS: &'static [&'static str] = &[];
 }
 
 /// An [`Object`] addressable by a primary key, single or composite.

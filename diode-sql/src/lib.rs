@@ -1,9 +1,11 @@
 //! # diode-sql
 //!
 //! Backend-agnostic SQL abstractions for the diode framework: a [`Value`] type,
-//! row mapping ([`Fields`], [`Object`], [`Keyed`], [`Values`], [`Columns`])
-//! and the [`IntoValue`] / [`ParseValue`] conversions. No database driver is
-//! involved here - a backend plugs in later by mapping these types to its own.
+//! row mapping ([`Fields`], [`Object`], [`Keyed`], [`Values`], [`Columns`]),
+//! the [`IntoValue`] / [`ParseValue`] conversions, and a small query builder
+//! ([`Select`], [`Insert`], [`Update`], [`Delete`]) that renders to SQL text and
+//! positional parameters per [`Dialect`]. No database driver is involved here -
+//! a backend plugs in later by mapping these types to its own.
 //!
 //! The core is dependency-free. Logical [`Value`] types are feature-gated and
 //! carry their standard crate's type: `chrono` (`DateTime<Utc>`), `uuid`
@@ -31,11 +33,13 @@
 mod column;
 mod error;
 mod object;
+mod query;
 mod value;
 
 pub use column::*;
 pub use error::*;
 pub use object::*;
+pub use query::*;
 pub use value::*;
 
 #[cfg(feature = "macros")]
