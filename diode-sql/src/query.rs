@@ -96,8 +96,8 @@ pub enum UnOp {
 /// [`IntoValue`], so `expr.eq(5)` binds a parameter while `expr.eq(Expr::col(c))`
 /// compares two columns.
 pub enum Expr {
-    /// A column reference.
-    Column(String),
+    /// A column reference, optionally qualified by a table name or alias.
+    Column { table: Option<String>, name: String },
     /// A bound literal, rendered as a placeholder.
     Value(Value),
     /// `name([DISTINCT] args)`.
@@ -130,12 +130,46 @@ pub enum Expr {
     /// always receives positional parameters; the caller is responsible for the
     /// fragment's safety (never build it from untrusted input).
     Raw { sql: String, params: Vec<Value> },
+    /// `CASE WHEN ... THEN ... [ELSE ...] END`.
+    Case {
+        whens: Vec<(Expr, Expr)>,
+        else_: Option<Box<Expr>>,
+    },
+    /// `CAST(expr AS ty)`.
+    Cast { expr: Box<Expr>, ty: String },
+    /// A scalar subquery `(SELECT ...)`.
+    Subquery(Box<Select>),
+    /// `[NOT] EXISTS (SELECT ...)`.
+    Exists { negated: bool, select: Box<Select> },
+    /// `expr [NOT] IN (SELECT ...)`.
+    InSubquery {
+        expr: Box<Expr>,
+        negated: bool,
+        select: Box<Select>,
+    },
+    /// `lhs IS [NOT] DISTINCT FROM rhs` (null-safe comparison).
+    DistinctFrom {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+        negated: bool,
+    },
 }
 
 impl Expr {
     /// A column reference.
     pub fn col(name: impl Into<String>) -> Self {
-        Expr::Column(name.into())
+        Expr::Column {
+            table: None,
+            name: name.into(),
+        }
+    }
+
+    /// A column reference qualified by a table name or alias (`table.name`).
+    pub fn col_at(table: impl Into<String>, name: impl Into<String>) -> Self {
+        Expr::Column {
+            table: Some(table.into()),
+            name: name.into(),
+        }
     }
 
     /// A bound literal value.
@@ -201,6 +235,35 @@ impl Expr {
     /// `avg(expr)`.
     pub fn avg(expr: Expr) -> Self {
         Expr::func("avg", [expr])
+    }
+
+    /// Starts a `CASE` expression; finish it with [`Case::end`].
+    pub fn case() -> Case {
+        Case {
+            whens: Vec::new(),
+            else_: None,
+        }
+    }
+
+    /// A scalar subquery `(SELECT ...)`.
+    pub fn subquery(select: Select) -> Self {
+        Expr::Subquery(Box::new(select))
+    }
+
+    /// `EXISTS (SELECT ...)`.
+    pub fn exists(select: Select) -> Self {
+        Expr::Exists {
+            negated: false,
+            select: Box::new(select),
+        }
+    }
+
+    /// `NOT EXISTS (SELECT ...)`.
+    pub fn not_exists(select: Select) -> Self {
+        Expr::Exists {
+            negated: true,
+            select: Box::new(select),
+        }
     }
 }
 
@@ -321,6 +384,78 @@ impl Expr {
             values: values.into_iter().map(IntoValue::into_value).collect(),
         }
     }
+
+    /// `self IN (SELECT ...)`.
+    pub fn in_subquery(self, select: Select) -> Expr {
+        Expr::InSubquery {
+            expr: Box::new(self),
+            negated: false,
+            select: Box::new(select),
+        }
+    }
+
+    /// `self NOT IN (SELECT ...)`.
+    pub fn not_in_subquery(self, select: Select) -> Expr {
+        Expr::InSubquery {
+            expr: Box::new(self),
+            negated: true,
+            select: Box::new(select),
+        }
+    }
+
+    /// `CAST(self AS ty)`.
+    pub fn cast(self, ty: impl Into<String>) -> Expr {
+        Expr::Cast {
+            expr: Box::new(self),
+            ty: ty.into(),
+        }
+    }
+
+    /// `self IS DISTINCT FROM rhs` (null-safe inequality).
+    pub fn is_distinct_from(self, rhs: impl Into<Expr>) -> Expr {
+        Expr::DistinctFrom {
+            lhs: Box::new(self),
+            rhs: Box::new(rhs.into()),
+            negated: false,
+        }
+    }
+
+    /// `self IS NOT DISTINCT FROM rhs` (null-safe equality).
+    pub fn is_not_distinct_from(self, rhs: impl Into<Expr>) -> Expr {
+        Expr::DistinctFrom {
+            lhs: Box::new(self),
+            rhs: Box::new(rhs.into()),
+            negated: true,
+        }
+    }
+}
+
+/// Builder for a `CASE WHEN ... END` expression (see [`Expr::case`]).
+pub struct Case {
+    whens: Vec<(Expr, Expr)>,
+    else_: Option<Box<Expr>>,
+}
+
+impl Case {
+    /// Adds a `WHEN cond THEN result` branch.
+    pub fn when(mut self, cond: Expr, result: impl Into<Expr>) -> Self {
+        self.whens.push((cond, result.into()));
+        self
+    }
+
+    /// Sets the `ELSE` result.
+    pub fn otherwise(mut self, result: impl Into<Expr>) -> Self {
+        self.else_ = Some(Box::new(result.into()));
+        self
+    }
+
+    /// Finishes the `CASE` expression.
+    pub fn end(self) -> Expr {
+        Expr::Case {
+            whens: self.whens,
+            else_: self.else_,
+        }
+    }
 }
 
 impl std::ops::Not for Expr {
@@ -381,10 +516,21 @@ expr_from!(
 
 fn precedence(expr: &Expr) -> u8 {
     match expr {
-        Expr::Column(_) | Expr::Value(_) | Expr::Func { .. } | Expr::Raw { .. } => 100,
+        Expr::Column { .. }
+        | Expr::Value(_)
+        | Expr::Func { .. }
+        | Expr::Raw { .. }
+        | Expr::Case { .. }
+        | Expr::Cast { .. }
+        | Expr::Subquery(_) => 100,
         Expr::Unary { op: UnOp::Neg, .. } => 8,
         Expr::Unary { op: UnOp::Not, .. } => 3,
-        Expr::In { .. } | Expr::Between { .. } | Expr::IsNull { .. } => 4,
+        Expr::In { .. }
+        | Expr::Between { .. }
+        | Expr::IsNull { .. }
+        | Expr::Exists { .. }
+        | Expr::InSubquery { .. }
+        | Expr::DistinctFrom { .. } => 4,
         Expr::Binary { op, .. } => op.precedence(),
     }
 }
@@ -472,6 +618,24 @@ impl Writer {
         }
     }
 
+    fn source(&mut self, source: &Source) {
+        match source {
+            Source::Table { name, alias } => {
+                self.ident(name);
+                if let Some(alias) = alias {
+                    self.sql.push_str(" AS ");
+                    self.ident(alias);
+                }
+            }
+            Source::Subquery { select, alias } => {
+                self.sql.push('(');
+                select.write(self);
+                self.sql.push_str(") AS ");
+                self.ident(alias);
+            }
+        }
+    }
+
     fn in_list(&mut self, expr: &Expr, values: &[Value]) {
         self.operand(expr, 4);
         self.sql.push_str(" IN (");
@@ -486,7 +650,13 @@ impl Writer {
 
     fn expr(&mut self, expr: &Expr) {
         match expr {
-            Expr::Column(name) => self.ident(name),
+            Expr::Column { table, name } => {
+                if let Some(table) = table {
+                    self.ident(table);
+                    self.sql.push('.');
+                }
+                self.ident(name);
+            }
             Expr::Value(value) => self.placeholder(value.clone()),
             Expr::Raw { sql, params } => self.raw(sql, params),
             Expr::Func {
@@ -585,6 +755,74 @@ impl Writer {
                 self.sql
                     .push_str(if *negated { " IS NOT NULL" } else { " IS NULL" });
             }
+            Expr::Case { whens, else_ } => {
+                self.sql.push_str("CASE");
+                for (cond, result) in whens {
+                    self.sql.push_str(" WHEN ");
+                    self.expr(cond);
+                    self.sql.push_str(" THEN ");
+                    self.expr(result);
+                }
+                if let Some(else_) = else_ {
+                    self.sql.push_str(" ELSE ");
+                    self.expr(else_);
+                }
+                self.sql.push_str(" END");
+            }
+            Expr::Cast { expr, ty } => {
+                self.sql.push_str("CAST(");
+                self.expr(expr);
+                self.sql.push_str(" AS ");
+                self.sql.push_str(ty);
+                self.sql.push(')');
+            }
+            Expr::Subquery(select) => {
+                self.sql.push('(');
+                select.write(self);
+                self.sql.push(')');
+            }
+            Expr::Exists { negated, select } => {
+                self.sql
+                    .push_str(if *negated { "NOT EXISTS (" } else { "EXISTS (" });
+                select.write(self);
+                self.sql.push(')');
+            }
+            Expr::InSubquery {
+                expr,
+                negated,
+                select,
+            } => {
+                self.operand(expr, 4);
+                self.sql
+                    .push_str(if *negated { " NOT IN (" } else { " IN (" });
+                select.write(self);
+                self.sql.push(')');
+            }
+            Expr::DistinctFrom { lhs, rhs, negated } => {
+                if self.dialect == Dialect::Mysql {
+                    // MySQL spells null-safe equality `a <=> b`; `IS DISTINCT
+                    // FROM` (negated == false) is its negation.
+                    if *negated {
+                        self.operand(lhs, 4);
+                        self.sql.push_str(" <=> ");
+                        self.operand(rhs, 4);
+                    } else {
+                        self.sql.push_str("NOT (");
+                        self.operand(lhs, 4);
+                        self.sql.push_str(" <=> ");
+                        self.operand(rhs, 4);
+                        self.sql.push(')');
+                    }
+                } else {
+                    self.operand(lhs, 4);
+                    self.sql.push_str(if *negated {
+                        " IS NOT DISTINCT FROM "
+                    } else {
+                        " IS DISTINCT FROM "
+                    });
+                    self.operand(rhs, 4);
+                }
+            }
         }
     }
 
@@ -624,6 +862,103 @@ pub enum Direction {
     Desc,
 }
 
+/// Null ordering for [`Select::order_by_nulls`] (ignored by the MySQL dialect).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nulls {
+    First,
+    Last,
+}
+
+/// A table or subquery in a `FROM` or `JOIN` clause.
+pub enum Source {
+    Table {
+        name: String,
+        alias: Option<String>,
+    },
+    Subquery {
+        select: Box<Select>,
+        alias: String,
+    },
+}
+
+impl Source {
+    /// A table by name.
+    pub fn table(name: impl Into<String>) -> Source {
+        Source::Table {
+            name: name.into(),
+            alias: None,
+        }
+    }
+
+    /// A subquery (derived table) with a mandatory alias.
+    pub fn subquery(select: Select, alias: impl Into<String>) -> Source {
+        Source::Subquery {
+            select: Box::new(select),
+            alias: alias.into(),
+        }
+    }
+
+    /// Sets the alias.
+    pub fn alias(mut self, alias: impl Into<String>) -> Source {
+        match &mut self {
+            Source::Table { alias: a, .. } => *a = Some(alias.into()),
+            Source::Subquery { alias: a, .. } => *a = alias.into(),
+        }
+        self
+    }
+}
+
+impl From<&str> for Source {
+    fn from(name: &str) -> Self {
+        Source::table(name)
+    }
+}
+
+impl From<String> for Source {
+    fn from(name: String) -> Self {
+        Source::table(name)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum JoinKind {
+    Inner,
+    Left,
+    Right,
+    Full,
+    Cross,
+}
+
+impl JoinKind {
+    fn sql(self) -> &'static str {
+        match self {
+            JoinKind::Inner => "INNER JOIN",
+            JoinKind::Left => "LEFT JOIN",
+            JoinKind::Right => "RIGHT JOIN",
+            JoinKind::Full => "FULL JOIN",
+            JoinKind::Cross => "CROSS JOIN",
+        }
+    }
+}
+
+struct Join {
+    kind: JoinKind,
+    source: Source,
+    on: Option<Expr>,
+}
+
+struct OrderTerm {
+    expr: Expr,
+    direction: Direction,
+    nulls: Option<Nulls>,
+}
+
+#[derive(Clone, Copy)]
+enum Lock {
+    Update,
+    Share,
+}
+
 /// What a [`Select`] returns.
 enum Projection {
     All(Vec<String>),
@@ -632,14 +967,17 @@ enum Projection {
 
 /// A `SELECT` statement.
 pub struct Select {
-    table: &'static str,
+    distinct: bool,
     projection: Projection,
+    from: Source,
+    joins: Vec<Join>,
     filter: Option<Expr>,
     group: Vec<Expr>,
     having: Option<Expr>,
-    order: Vec<(String, Direction)>,
+    order: Vec<OrderTerm>,
     limit: Option<u64>,
     offset: Option<u64>,
+    lock: Option<Lock>,
 }
 
 impl Select {
@@ -686,9 +1024,82 @@ impl Select {
         self
     }
 
+    /// Selects only distinct rows (`SELECT DISTINCT`).
+    pub fn distinct(mut self) -> Self {
+        self.distinct = true;
+        self
+    }
+
+    /// Replaces the `FROM` source (for an alias or a derived table).
+    pub fn from(mut self, source: impl Into<Source>) -> Self {
+        self.from = source.into();
+        self
+    }
+
+    fn add_join(mut self, kind: JoinKind, source: impl Into<Source>, on: Option<Expr>) -> Self {
+        self.joins.push(Join {
+            kind,
+            source: source.into(),
+            on,
+        });
+        self
+    }
+
+    /// `INNER JOIN source ON on`.
+    pub fn inner_join(self, source: impl Into<Source>, on: Expr) -> Self {
+        self.add_join(JoinKind::Inner, source, Some(on))
+    }
+
+    /// `LEFT JOIN source ON on`.
+    pub fn left_join(self, source: impl Into<Source>, on: Expr) -> Self {
+        self.add_join(JoinKind::Left, source, Some(on))
+    }
+
+    /// `RIGHT JOIN source ON on`.
+    pub fn right_join(self, source: impl Into<Source>, on: Expr) -> Self {
+        self.add_join(JoinKind::Right, source, Some(on))
+    }
+
+    /// `FULL JOIN source ON on` (unsupported by MySQL and SQLite).
+    pub fn full_join(self, source: impl Into<Source>, on: Expr) -> Self {
+        self.add_join(JoinKind::Full, source, Some(on))
+    }
+
+    /// `CROSS JOIN source`.
+    pub fn cross_join(self, source: impl Into<Source>) -> Self {
+        self.add_join(JoinKind::Cross, source, None)
+    }
+
     /// Appends an `ORDER BY` term; terms apply in the order added.
-    pub fn order_by(mut self, column: impl Into<String>, direction: Direction) -> Self {
-        self.order.push((column.into(), direction));
+    pub fn order_by(mut self, expr: Expr, direction: Direction) -> Self {
+        self.order.push(OrderTerm {
+            expr,
+            direction,
+            nulls: None,
+        });
+        self
+    }
+
+    /// Appends an `ORDER BY` term with explicit null ordering (the `NULLS`
+    /// clause is omitted for the MySQL dialect, which lacks it).
+    pub fn order_by_nulls(mut self, expr: Expr, direction: Direction, nulls: Nulls) -> Self {
+        self.order.push(OrderTerm {
+            expr,
+            direction,
+            nulls: Some(nulls),
+        });
+        self
+    }
+
+    /// `FOR UPDATE` row locking (omitted for SQLite, which lacks it).
+    pub fn for_update(mut self) -> Self {
+        self.lock = Some(Lock::Update);
+        self
+    }
+
+    /// `FOR SHARE` row locking (omitted for SQLite, which lacks it).
+    pub fn for_share(mut self) -> Self {
+        self.lock = Some(Lock::Share);
         self
     }
 
@@ -707,13 +1118,19 @@ impl Select {
     /// Renders to SQL text and its positional parameters.
     pub fn render(&self, dialect: Dialect) -> (String, Values) {
         let mut w = Writer::new(dialect);
+        self.write(&mut w);
+        w.finish()
+    }
+
+    /// Appends this `SELECT` to `w`; used directly when embedding as a subquery.
+    fn write(&self, w: &mut Writer) {
+        w.sql.push_str("SELECT ");
+        if self.distinct {
+            w.sql.push_str("DISTINCT ");
+        }
         match &self.projection {
-            Projection::All(columns) => {
-                w.sql.push_str("SELECT ");
-                w.ident_list(columns);
-            }
+            Projection::All(columns) => w.ident_list(columns),
             Projection::Items(items) => {
-                w.sql.push_str("SELECT ");
                 for (i, (expr, alias)) in items.iter().enumerate() {
                     if i != 0 {
                         w.sql.push_str(", ");
@@ -727,7 +1144,17 @@ impl Select {
             }
         }
         w.sql.push_str(" FROM ");
-        w.ident(self.table);
+        w.source(&self.from);
+        for join in &self.joins {
+            w.sql.push(' ');
+            w.sql.push_str(join.kind.sql());
+            w.sql.push(' ');
+            w.source(&join.source);
+            if let Some(on) = &join.on {
+                w.sql.push_str(" ON ");
+                w.expr(on);
+            }
+        }
         w.where_clause(&self.filter);
         if !self.group.is_empty() {
             w.sql.push_str(" GROUP BY ");
@@ -744,15 +1171,24 @@ impl Select {
         }
         if !self.order.is_empty() {
             w.sql.push_str(" ORDER BY ");
-            for (i, (column, direction)) in self.order.iter().enumerate() {
+            for (i, term) in self.order.iter().enumerate() {
                 if i != 0 {
                     w.sql.push_str(", ");
                 }
-                w.ident(column);
-                w.sql.push_str(match direction {
+                w.expr(&term.expr);
+                w.sql.push_str(match term.direction {
                     Direction::Asc => " ASC",
                     Direction::Desc => " DESC",
                 });
+                // NULLS FIRST/LAST is unsupported by MySQL.
+                if let Some(nulls) = term.nulls
+                    && w.dialect != Dialect::Mysql
+                {
+                    w.sql.push_str(match nulls {
+                        Nulls::First => " NULLS FIRST",
+                        Nulls::Last => " NULLS LAST",
+                    });
+                }
             }
         }
         if let Some(limit) = self.limit {
@@ -761,8 +1197,22 @@ impl Select {
         if let Some(offset) = self.offset {
             let _ = write!(w.sql, " OFFSET {offset}");
         }
-        w.finish()
+        // SQLite has no row-level locking clause.
+        if let Some(lock) = self.lock
+            && w.dialect != Dialect::Sqlite
+        {
+            w.sql.push_str(match lock {
+                Lock::Update => " FOR UPDATE",
+                Lock::Share => " FOR SHARE",
+            });
+        }
     }
+}
+
+/// Conflict handling for an [`Insert`] (upsert).
+enum OnConflict {
+    DoNothing { target: Vec<String> },
+    DoUpdate { target: Vec<String> },
 }
 
 /// An `INSERT` statement.
@@ -770,10 +1220,45 @@ pub struct Insert {
     table: &'static str,
     columns: Vec<String>,
     values: Values,
+    on_conflict: Option<OnConflict>,
     returning: Vec<String>,
 }
 
 impl Insert {
+    /// `ON CONFLICT (target) DO NOTHING`: skip the row if it already exists.
+    /// An empty `target` matches any conflict (Postgres / SQLite). The MySQL
+    /// dialect renders a no-op `ON DUPLICATE KEY UPDATE col = col` and cannot
+    /// express a target (any unique key conflicts).
+    pub fn on_conflict_do_nothing(
+        mut self,
+        target: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.on_conflict = Some(OnConflict::DoNothing {
+            target: target.into_iter().map(Into::into).collect(),
+        });
+        self
+    }
+
+    /// `ON CONFLICT (target) DO UPDATE SET ...`: insert the row or, when it
+    /// already exists, update every inserted non-target column to the new value.
+    /// Degrades to `DO NOTHING` when there is nothing left to set. The MySQL
+    /// dialect renders `ON DUPLICATE KEY UPDATE col = VALUES(col)` and cannot
+    /// express a target (any unique key conflicts).
+    ///
+    /// # Panics
+    ///
+    /// Rendering panics on the Postgres / SQLite dialects if `target` is empty
+    /// (`DO UPDATE` requires a conflict target there).
+    pub fn on_conflict_do_update(
+        mut self,
+        target: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.on_conflict = Some(OnConflict::DoUpdate {
+            target: target.into_iter().map(Into::into).collect(),
+        });
+        self
+    }
+
     /// Appends a `RETURNING` clause (for example the generated key). Supported by
     /// Postgres and SQLite 3.35+.
     pub fn returning(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
@@ -803,6 +1288,57 @@ impl Insert {
             }
             w.sql.push(')');
         }
+        match &self.on_conflict {
+            None => {}
+            Some(OnConflict::DoNothing { target }) => match dialect {
+                Dialect::Mysql => mysql_noop_update(&mut w, &self.columns),
+                _ => do_nothing_clause(&mut w, target),
+            },
+            Some(OnConflict::DoUpdate { target }) => {
+                // Update every inserted column that is not part of the target.
+                let updates: Vec<&String> =
+                    self.columns.iter().filter(|c| !target.contains(c)).collect();
+                match dialect {
+                    Dialect::Mysql => {
+                        if updates.is_empty() {
+                            mysql_noop_update(&mut w, &self.columns);
+                        } else {
+                            w.sql.push_str(" ON DUPLICATE KEY UPDATE ");
+                            for (i, column) in updates.iter().enumerate() {
+                                if i != 0 {
+                                    w.sql.push_str(", ");
+                                }
+                                w.ident(column);
+                                w.sql.push_str(" = VALUES(");
+                                w.ident(column);
+                                w.sql.push(')');
+                            }
+                        }
+                    }
+                    _ => {
+                        if updates.is_empty() {
+                            do_nothing_clause(&mut w, target);
+                        } else {
+                            assert!(
+                                !target.is_empty(),
+                                "ON CONFLICT DO UPDATE requires target columns"
+                            );
+                            w.sql.push_str(" ON CONFLICT (");
+                            w.ident_list(target);
+                            w.sql.push_str(") DO UPDATE SET ");
+                            for (i, column) in updates.iter().enumerate() {
+                                if i != 0 {
+                                    w.sql.push_str(", ");
+                                }
+                                w.ident(column);
+                                w.sql.push_str(" = excluded.");
+                                w.ident(column);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if !self.returning.is_empty() {
             assert!(
                 dialect != Dialect::Mysql,
@@ -813,6 +1349,28 @@ impl Insert {
         }
         w.finish()
     }
+}
+
+/// `ON CONFLICT [(target)] DO NOTHING` (Postgres / SQLite).
+fn do_nothing_clause(w: &mut Writer, target: &[String]) {
+    w.sql.push_str(" ON CONFLICT");
+    if !target.is_empty() {
+        w.sql.push_str(" (");
+        w.ident_list(target);
+        w.sql.push(')');
+    }
+    w.sql.push_str(" DO NOTHING");
+}
+
+/// MySQL's spelling of "do nothing": assign some column to itself.
+fn mysql_noop_update(w: &mut Writer, columns: &[String]) {
+    let column = columns
+        .first()
+        .expect("an upsert needs at least one inserted column");
+    w.sql.push_str(" ON DUPLICATE KEY UPDATE ");
+    w.ident(column);
+    w.sql.push_str(" = ");
+    w.ident(column);
 }
 
 /// An `UPDATE` statement.
@@ -899,7 +1457,7 @@ impl Delete {
 
 /// Any one of the SQL statements this crate builds.
 pub enum Statement {
-    Select(Select),
+    Select(Box<Select>),
     Insert(Insert),
     Update(Update),
     Delete(Delete),
@@ -919,7 +1477,7 @@ impl Statement {
 
 impl From<Select> for Statement {
     fn from(s: Select) -> Self {
-        Statement::Select(s)
+        Statement::Select(Box::new(s))
     }
 }
 
@@ -946,14 +1504,17 @@ pub trait QueryObject: Object {
     /// `SELECT <columns> FROM <table>`, with no filter.
     fn select() -> Select {
         Select {
-            table: Self::TABLE_NAME,
+            distinct: false,
             projection: Projection::All(Self::columns().names().to_vec()),
+            from: Source::table(Self::TABLE_NAME),
+            joins: Vec::new(),
             filter: None,
             group: Vec::new(),
             having: None,
             order: Vec::new(),
             limit: None,
             offset: None,
+            lock: None,
         }
     }
 
@@ -980,6 +1541,7 @@ pub trait QueryObject: Object {
             table: Self::TABLE_NAME,
             columns: names,
             values,
+            on_conflict: None,
             returning: Vec::new(),
         }
     }
@@ -992,6 +1554,14 @@ pub trait QueryKeyed: Keyed {
     /// `SELECT ... WHERE <key>` for the row with `key`.
     fn find(key: Self::Key) -> Select {
         <Self as QueryObject>::select().filter(key_filter::<Self>(&key))
+    }
+
+    /// `INSERT ... ON CONFLICT (<key columns>) DO UPDATE`: insert the row or
+    /// update its non-key columns if it already exists. The idiomatic write for
+    /// a natural (non-generated) key, where "new or existing" is only knowable
+    /// by the database.
+    fn upsert(&self) -> Insert {
+        <Self as QueryObject>::insert(self).on_conflict_do_update(Self::KEY_COLUMNS.iter().copied())
     }
 
     /// `DELETE FROM <table> WHERE <key>`.

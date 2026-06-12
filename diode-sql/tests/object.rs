@@ -158,6 +158,39 @@ fn keyless_object_round_trips() {
     assert_eq!(AuditEntry::TABLE_NAME, "audit_log");
 }
 
+// --- natural (non-Option) single key ---
+
+#[derive(Object, Debug, Clone, PartialEq)]
+#[object(table = "settings")]
+struct Setting {
+    #[column(primary_key)]
+    name: String,
+    value: String,
+}
+
+#[test]
+fn natural_string_key() {
+    let setting = Setting {
+        name: "theme".to_string(),
+        value: "dark".to_string(),
+    };
+    // A natural key is always present.
+    assert_eq!(setting.key(), Some("theme".to_string()));
+    assert_eq!(Setting::KEY_COLUMNS.to_vec(), vec!["name"]);
+    // Not database-generated, so insert must keep the column.
+    assert_eq!(Setting::GENERATED_COLUMNS, &[] as &[&str]);
+
+    let values = Setting::key_values(&"theme".to_string());
+    assert_eq!(
+        values.as_slice().to_vec(),
+        vec![Value::Text("theme".to_string())]
+    );
+
+    let columns = Setting::columns();
+    let row = setting.values(columns);
+    assert_eq!(Setting::parse(&row, columns).unwrap(), setting);
+}
+
 // --- flatten: embedded value group ---
 
 #[derive(Fields, Debug, Clone, PartialEq)]
